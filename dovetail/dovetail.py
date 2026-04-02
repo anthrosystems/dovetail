@@ -1,8 +1,7 @@
 """
 Dovetail - A lightweight helper for sync/async interoperability.
 
-This module exposes a `Dovetail` helper class and a module-level
-`dovetail` instance that make it easy to:
+This module exposes a `Dovetail` helper class that makes it easy to:
 
 - call blocking (synchronous) functions from async code without blocking the event loop,
 - schedule coroutines or run sync callables in the background, and
@@ -33,8 +32,8 @@ class Dovetail:
         sync code (uses `asyncio.run()` for coroutines).
 
     Create an instance with `Dovetail(max_workers=...)` and call
-    `D = Dovetail(); D.Task.to_thread(...)` to use. Call
-    `D.shutdown()` to cleanly close the executor when finished.
+    `d = Dovetail(); d.task.to_thread(...)` to use. Call
+    `d.shutdown()` to cleanly close the executor when finished.
     """
 
     def __init__(self, loop: Optional[asyncio.AbstractEventLoop] = None, max_workers: Optional[int] = None):
@@ -46,14 +45,14 @@ class Dovetail:
         self._threadpool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
         # Expose a `task` helper bound to this Dovetail instance for
-        # ergonomics: `Dovetail.Task.to_thread(...)` etc.
+        # ergonomics: `Dovetail.task.to_thread(...)` etc.
         self.task = self.Task(self)
         
     class Task:
         """Helpers for scheduling and bridging sync/async call sites.
 
         Use the `Task` helper from a `Dovetail` instance (e.g.
-        `dovetail.task`) to run blocking callables in a threadpool,
+        `Dovetail.task`) to run blocking callables in a threadpool,
         schedule coroutines, or run async code from sync contexts.
         """
 
@@ -82,8 +81,8 @@ class Dovetail:
 
             Important: if an event loop is already running on the current
             thread this method will raise `RuntimeError` to avoid deadlock.
-            Callers in async code should use `await Dovetail.Task.schedule(...)`
-            or `await Dovetail.Task.to_thread(...)` instead.
+            Callers in async code should use `await d.task.schedule(...)`
+            or `await d.task.to_thread(...)` instead.
             """
             try:
                 # If a loop is running on this thread, get_running_loop()
@@ -104,9 +103,9 @@ class Dovetail:
 
             # If we get here, a loop is running on the current thread.
             raise RuntimeError(
-                "Dovetail.Task.run_blocking() cannot be called from a running "
-                "event loop. Use await Dovetail.Task.schedule(...) or await "
-                "Dovetail.Task.to_thread(...) instead."
+                "d.task.run_blocking() cannot be called from a running "
+                "event loop. Use await d.task.schedule(...) or await "
+                "d.task.to_thread(...) instead."
             )
 
         def schedule(
@@ -115,15 +114,15 @@ class Dovetail:
             *args: Any,
             type: Optional[str] = None,
             **kwargs: Any,
-        ) -> asyncio.Task:
-            """Schedule work from async code and return an `asyncio.Task`.
+        ) -> asyncio.task:
+            """Schedule work from async code and return an `asyncio.task`.
 
             Behavior:
             - If passed a coroutine object, it is scheduled directly.
             - If passed an async function, it is called with the provided
               args/kwargs and scheduled.
             - If passed a sync callable, it is wrapped and executed in the
-              threadpool; an `asyncio.Task` wrapping that work is returned.
+              threadpool; an `asyncio.task` wrapping that work is returned.
 
             The returned `Task` can be awaited for the result or left
             un-awaited for fire-and-forget semantics. The optional `type`
