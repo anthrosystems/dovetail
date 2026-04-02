@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dovetail"
 version = "0.1.0"
-description = "Lightweight helpers for sync/async interoperability."
+description = "A lightweight helper for sync/async interoperability"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = []

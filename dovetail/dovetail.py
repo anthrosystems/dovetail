@@ -1,5 +1,5 @@
 """
-Dovetail - lightweight helpers for sync/async interoperability.
+Dovetail - A lightweight helper for sync/async interoperability.
 
 This module exposes a `Dovetail` helper class and a module-level
 `dovetail` instance that make it easy to:
