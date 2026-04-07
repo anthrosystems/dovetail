@@ -94,20 +94,21 @@ class Dovetail:
             return
 
         current = threading.current_thread()
-        lines = [
-            f"[{self._trace_prefix}] Thread: {current.name}#{threading.get_ident()}:",
-        ]
+        lines = [f"[{self._trace_prefix}] Thread: {current.name}#{threading.get_ident()}:"]
 
+        detail_parts = []
         if task is not None:
-            lines.append(f"Task: {task}")
+            detail_parts.append(f"Task: {task}")
         if function:
-            lines.append(f"Function: {function}")
+            detail_parts.append(f"Function: {function}")
+        detail_parts.append(f"Method: {method}")
+        lines.append(" | ".join(detail_parts))
 
-        lines.append(f"Method: {method}")
-        lines.append(f"Status: {status}")
-
+        status_parts = [f"Status: {status}"]
         if elapsed is not None:
-            lines.append(f"Elapsed: {elapsed:.3f}s")
+            status_parts.append(f"Elapsed: {elapsed:.3f}s")
+        lines.append(" | ".join(status_parts))
+
         if extra:
             for key, value in extra.items():
                 if value is None:

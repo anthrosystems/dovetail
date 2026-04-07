@@ -80,11 +80,8 @@ Example log line:
 
 ```text
 [Dovetail] Thread: ThreadPoolExecutor-2_4#12345:
-Task: 17
-Function: _some_func
-Method: to_thread
-Status: Done
-Elapsed: 0.238s
+Task: 17 | Function: _some_func | Method: to_thread
+Status: Done | Elapsed: 0.238s
 ```
 
 You can customise trace metadata:
