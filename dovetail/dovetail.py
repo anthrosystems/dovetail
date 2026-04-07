@@ -307,6 +307,7 @@ class Dovetail:
             Callers in async code should use `await d.task.schedule(...)`
             or `await d.task.to_thread(...)` instead.
             """
+            started_at = time.perf_counter()
             try:
                 # If a loop is running on this thread, get_running_loop()
                 # returns it; we treat that as a fatal usage error.
@@ -316,20 +317,84 @@ class Dovetail:
                 # No running loop - safe to execute synchronously.
                 if inspect.iscoroutinefunction(func_or_coro):
                     # A coroutine function was passed - call it and run it.
-                    self._dovetail._trace(
-                        f"run_blocking coroutine-function fn={self._dovetail._callable_name(func_or_coro)}"
+                    func_name = self._dovetail._callable_name(func_or_coro)
+                    self._dovetail._trace_struct(
+                        method="run_blocking",
+                        status="Start",
+                        function=func_name,
+                        extra={"Type": "coroutine-function"},
                     )
-                    return asyncio.run(func_or_coro(*args, **kwargs))
+                    try:
+                        result = asyncio.run(func_or_coro(*args, **kwargs))
+                        self._dovetail._trace_struct(
+                            method="run_blocking",
+                            status="Done",
+                            function=func_name,
+                            elapsed=time.perf_counter() - started_at,
+                            extra={"Type": "coroutine-function"},
+                        )
+                        return result
+                    except Exception as exc:
+                        self._dovetail._trace_struct(
+                            method="run_blocking",
+                            status="Error",
+                            function=func_name,
+                            elapsed=time.perf_counter() - started_at,
+                            extra={"Type": "coroutine-function", "Error": exc},
+                        )
+                        raise
                 if inspect.iscoroutine(func_or_coro):
                     # A coroutine object was passed - run it directly.
-                    self._dovetail._trace("run_blocking coroutine-object")
-                    return asyncio.run(func_or_coro)
+                    self._dovetail._trace_struct(
+                        method="run_blocking",
+                        status="Start",
+                        extra={"Type": "coroutine-object"},
+                    )
+                    try:
+                        result = asyncio.run(func_or_coro)
+                        self._dovetail._trace_struct(
+                            method="run_blocking",
+                            status="Done",
+                            elapsed=time.perf_counter() - started_at,
+                            extra={"Type": "coroutine-object"},
+                        )
+                        return result
+                    except Exception as exc:
+                        self._dovetail._trace_struct(
+                            method="run_blocking",
+                            status="Error",
+                            elapsed=time.perf_counter() - started_at,
+                            extra={"Type": "coroutine-object", "Error": exc},
+                        )
+                        raise
                 
                 # Regular sync callable - call and return its result.
-                self._dovetail._trace(
-                    f"run_blocking callable fn={self._dovetail._callable_name(func_or_coro)}"
+                call_name = self._dovetail._callable_name(func_or_coro)
+                self._dovetail._trace_struct(
+                    method="run_blocking",
+                    status="Start",
+                    function=call_name,
+                    extra={"Type": "callable"},
                 )
-                return func_or_coro(*args, **kwargs)
+                try:
+                    result = func_or_coro(*args, **kwargs)
+                    self._dovetail._trace_struct(
+                        method="run_blocking",
+                        status="Done",
+                        function=call_name,
+                        elapsed=time.perf_counter() - started_at,
+                        extra={"Type": "callable"},
+                    )
+                    return result
+                except Exception as exc:
+                    self._dovetail._trace_struct(
+                        method="run_blocking",
+                        status="Error",
+                        function=call_name,
+                        elapsed=time.perf_counter() - started_at,
+                        extra={"Type": "callable", "Error": exc},
+                    )
+                    raise
 
             # If we get here, a loop is running on the current thread.
             raise RuntimeError(
