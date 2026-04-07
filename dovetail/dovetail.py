@@ -496,5 +496,13 @@ class Dovetail:
 
     def shutdown(self, wait: bool = True) -> None:
         """Shutdown internal threadpool."""
-        self._trace(f"shutdown wait={wait}")
+        if self._trace_enabled:
+            current = threading.current_thread()
+            self._trace_logger.debug(
+                "[%s] Thread: %s#%s: Shutdown (wait=%s)",
+                self._trace_prefix,
+                current.name,
+                threading.get_ident(),
+                wait,
+            )
         self._threadpool.shutdown(wait=wait)
