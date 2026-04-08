@@ -1,13 +1,12 @@
-# Dovetail - Sync / Async wrapper for Python, built on asyncio.
+# Dovetail - Sync / Async wrapper for Python.
 
 [![CI](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml) 
 [![PyPI version](https://img.shields.io/pypi/v/dovetail.svg)](https://pypi.org/project/pydovetail/) 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dovetail.svg)](https://github.com/anthrosystems/dovetail/releases/latest)
 
-A lightweight helper for bridging synchronous and asynchronous code in Python.
-Minimal surface, no runtime dependencies, suitable for libraries and apps that
-need safe threadpool usage and simple sync/async interoperability.
+A lightweight helper for bridging sync and async code.
+Minimal API, no runtime dependencies.
 
 ## Install
 
@@ -15,9 +14,9 @@ need safe threadpool usage and simple sync/async interoperability.
 pip install pydovetail
 ```
 
-## Usage (quick)
+## Quick Start
 
-Create a `Dovetail` instance and use its `Task` helper:
+Create one `Dovetail` instance and use `dvt.task`:
 
 ```py
 from dovetail import Dovetail
@@ -42,56 +41,72 @@ result = await dvt.task.to_thread(fetch_data, "target.json")
 
 # Async caller -> async function (await or fire-and-forget)
 task = dvt.task.schedule(fetch_data())
+
+# Global watch: run callback when any task ends
+sub_id = dvt.events.on_end(some_function)
+
+# Optional defaults (all opt-in)
+dvt = Dovetail(
+    max_workers=8,
+    rate_limit_per_sec=20,      # cap task starts/sec
+    rate_limit_burst=40,        # allow short bursts
+    default_timeout=30.0,       # applies to async waits around tasks
+    default_retries=2,          # retries for sync callables in to_thread/schedule
+    default_retry_backoff=0.25, # exponential backoff base seconds
+)
 ```
 
-### Quick API
+## API Summary
 
-- `dvt.task.to_thread(func, *args, **kwargs)` - run a blocking callable in the instance threadpool from async code.
-- `dvt.task.to_thread_blocking(func, *args, **kwargs)` - sync convenience wrapper for `to_thread(...)`; runs in the threadpool and blocks until complete.
-- `dvt.task.schedule(coro_or_callable, *args, type=None, **kwargs)` - schedule a coroutine or execute a sync callable in the threadpool; returns an `asyncio.task`.
-- `dvt.task.run_blocking(func_or_coro, *args, **kwargs)` - run sync functions or coroutines synchronously (uses `asyncio.run()`); raises if called inside a running event loop.
-- `dvt.task.map_blocking(func, items, max_concurrency=None, return_exceptions=False)` - apply a sync callable over a collection concurrently in the threadpool and block for ordered results.
+- `dvt.task.to_thread(func, *args, **kwargs)`: await a sync callable in Dovetail's threadpool; supports default timeout/retry settings.
+- `dvt.task.to_thread_blocking(func, *args, **kwargs)`: synchronous wrapper for `to_thread` when you are not already in an event loop.
+- `dvt.task.schedule(coro_or_callable, *args, type=None, **kwargs)`: create and return an `asyncio.Task` from a coroutine object, async function, or sync callable.
+- `dvt.task.run_blocking(func_or_coro, *args, **kwargs)`: run async or sync work from synchronous code.
+- `dvt.task.map_blocking(func, items, max_concurrency=None, return_exceptions=False)`: run ordered parallel map over `items` using the threadpool.
+- `dvt.events.on_queued(...)`: listen for `task_queued`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.on_start(...)`: listen for `task_started`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.on_end(...)`: listen for `task_done`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.on_error(...)`: listen for `task_error`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.on_retry(...)`: listen for `task_retry`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.on_cancel(...)`: listen for `task_cancelled`; callback receives one payload dict; returns a subscription id.
+- `dvt.events.stats()`: cumulative counters for this instance: `queued`, `started`, `done`, `error`, `retries`, `throttled`.
 
-## Concurrency tracing (debug)
+Listener scope parameters apply to all `dvt.events.on_*` methods:
 
-`Dovetail` supports an opt-in trace mode to show worker/thread activity:
+- `function_target`: only events for that function/callable.
+- `instance_target`: only events for that execution id.
+- `allow_reentry=False`: block recursive reentry while callback is already active.
+- `max_chain_depth=5`: maximum active callback depth when reentry is allowed.
 
-```py
-import logging
-from dovetail import Dovetail
+## Detailed Guides
 
-logging.basicConfig(level=logging.DEBUG)
+- [Event listeners and chaining](docs/event-listeners.md)
+- [Observability (stats, payloads, tracing)](docs/observability.md)
+- [Retry, timeout, and rate limit behavior](docs/retry-timeout-rate-limit.md)
 
-# Option 1: explicit constructor flag
-dvt = Dovetail(max_workers=8, trace=True)
 
-# Option 2: environment variable
-#   DOVETAIL_TRACE=true
-```
+## Event Listeners
 
-When enabled, Dovetail emits debug logs including:
+Use listeners to observe lifecycle events and to trigger follow-up work.
+Most users should scope listeners with `function_target`; `instance_target` is available for advanced per-instance control.
 
-- task queued/start/done/error lifecycle
-- thread name + thread id
-- elapsed time per worker task
-- schedule/map lifecycle summaries
+For full guidance, examples, and pitfalls, see [docs/event-listeners.md](docs/event-listeners.md).
 
-Example log line:
 
-```text
-[Dovetail] Thread: ThreadPoolExecutor-2_4#12345:
-Task: 17 | Function: _some_func | Method: to_thread
-Status: Done | Elapsed: 0.238s
-```
+## Status Model
 
-You can customise trace metadata:
+Counters are available via `dvt.events.stats()` and lifecycle events are emitted during task execution.
 
-```py
-logger = logging.getLogger("myapp.dovetail")
-dvt = Dovetail(trace=True, trace_logger=logger, trace_prefix="DownloaderPool")
-```
+For counter meanings and payload details, see [docs/observability.md](docs/observability.md).
 
-## Best practices
+## Tracing (Debug)
+
+Tracing is opt-in via `trace=True` or `DOVETAIL_TRACE=true`.
+
+For trace output details and configuration, see [docs/observability.md](docs/observability.md).
+For retry/timeout/rate-limit semantics, see [docs/retry-timeout-rate-limit.md](docs/retry-timeout-rate-limit.md).
+
+## Notes
 
 - Call `dvt.shutdown()` to cleanly close the threadpool when the instance is no longer needed.
 - For fire-and-forget of a sync callable, pass a `lambda` or `functools.partial` so the callable isn't executed eagerly.

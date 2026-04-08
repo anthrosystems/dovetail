@@ -132,3 +132,90 @@ def test_local_dovetail_shutdown() -> None:
     res = asyncio.run(local.task.to_thread(lambda: 42))
     assert res == 42
     local.shutdown()
+
+
+def test_to_thread_retries_eventually_succeeds() -> None:
+    local = Dovetail(default_retries=2)
+    counter = {"calls": 0}
+
+    def flaky():
+        counter["calls"] += 1
+        if counter["calls"] < 3:
+            raise ValueError("transient")
+        return 99
+
+    async def _run():
+        return await local.task.to_thread(flaky)
+
+    assert asyncio.run(_run()) == 99
+    assert counter["calls"] == 3
+    stats = local.events.stats()
+    assert stats["retries"] >= 2
+    local.shutdown()
+
+
+def test_default_timeout_on_coroutine_schedule() -> None:
+    local = Dovetail(default_timeout=0.01)
+
+    async def slow():
+        await asyncio.sleep(0.1)
+        return 1
+
+    async def _run():
+        task = local.task.schedule(slow())
+        with pytest.raises(asyncio.TimeoutError):
+            await task
+
+    asyncio.run(_run())
+    local.shutdown()
+
+
+def test_events_fire_for_to_thread_lifecycle() -> None:
+    local = Dovetail(default_retries=1)
+    events = []
+
+    local.events.on_queued(lambda payload: events.append(("queued", payload.get("method"))))
+    local.events.on_start(lambda payload: events.append(("started", payload.get("method"))))
+    local.events.on_end(lambda payload: events.append(("done", payload.get("method"))))
+
+    async def _run():
+        return await local.task.to_thread(lambda: 5)
+
+    assert asyncio.run(_run()) == 5
+    labels = [name for name, _ in events]
+    assert "queued" in labels
+    assert "started" in labels
+    assert "done" in labels
+    local.shutdown()
+
+
+def test_events_on_end_listener_global_and_scoped() -> None:
+    local = Dovetail()
+    seen = {"global": 0, "scoped": 0}
+
+    async def _run():
+        task = local.task.schedule(async_coro, 10)
+
+        local.events.on_end(lambda _payload=None: seen.__setitem__("global", seen["global"] + 1))
+
+        local.events.on_end(
+            lambda _payload=None: seen.__setitem__("scoped", seen["scoped"] + 1),
+            function_target=async_coro,
+        )
+
+        await task
+        await asyncio.sleep(0.01)
+
+    asyncio.run(_run())
+    assert seen["global"] >= 1
+    assert seen["scoped"] >= 1
+    local.shutdown()
+
+
+def test_events_listener_rejects_both_targets() -> None:
+    local = Dovetail()
+
+    with pytest.raises(ValueError):
+        local.events.on_end(lambda _payload=None: None, function_target="f", instance_target="run-1")
+
+    local.shutdown()
