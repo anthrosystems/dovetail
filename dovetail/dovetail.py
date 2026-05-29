@@ -111,6 +111,9 @@ class Dovetail:
             trace_prefix=trace_prefix,
         )
         self.task = Task(self)
+        # Shutdown tracking to make shutdown() idempotent and safe
+        self._shutdown = False
+        self._shutdown_lock = threading.Lock()
 
     def _next_trace_id(self) -> int:
         return next(self._trace_counter)
@@ -157,6 +160,37 @@ class Dovetail:
         
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the internal threadpool executor."""
+        # Make shutdown idempotent and thread-safe.
+        with self._shutdown_lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+
         if self.events.trace_enabled:
             self.events.trace(f"Shutdown (wait={wait})")
-        self._threadpool.shutdown(wait=wait)
+        try:
+            self._threadpool.shutdown(wait=wait)
+        except Exception as exc:
+            # Defensive: shutdown should not raise during cleanup calls
+            if self.events.trace_enabled:
+                self.events.trace(f"Shutdown error: {exc}")
+
+    # Context manager support (sync + async)
+    def __enter__(self) -> "Dovetail":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Synchronous context manager: perform blocking shutdown
+        self.shutdown(wait=True)
+
+    async def __aenter__(self) -> "Dovetail":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        # Async context manager: run shutdown in executor to avoid blocking loop
+        try:
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.shutdown, True)
+        except RuntimeError:
+            # No running loop; fallback to direct call
+            self.shutdown(wait=True)

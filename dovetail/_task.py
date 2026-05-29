@@ -71,6 +71,14 @@ class Task:
             "function": function,
             "execution_id": execution_id,
         }
+        # Update cumulative counters for coroutine-based tasks so stats()
+        # reflect scheduled/started work (other paths already increment).
+        try:
+            self._dovetail.events.inc_stat("queued")
+            self._dovetail.events.inc_stat("started")
+        except Exception:
+            # Be defensive: stats updating must not break scheduling.
+            pass
         self._dovetail._emit_event("task_queued", payload)
         self._dovetail._emit_event("task_started", payload)
 
@@ -86,8 +94,16 @@ class Task:
                 return
             exc = done_task.exception()
             if exc is None:
+                try:
+                    self._dovetail.events.inc_stat("done")
+                except Exception:
+                    pass
                 self._dovetail._emit_event("task_done", done_payload)
             else:
+                try:
+                    self._dovetail.events.inc_stat("error")
+                except Exception:
+                    pass
                 done_payload["error"] = exc
                 self._dovetail._emit_event("task_error", done_payload)
 
