@@ -11,13 +11,8 @@ events, and cumulative status counters.
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
-import itertools
-import logging
-import os
-import threading
-import time
+import os, time, logging, itertools
+import asyncio, threading, concurrent.futures
 from typing import Any, Callable, Optional, Dict
 
 from ._events import Events
@@ -45,6 +40,10 @@ class _TokenBucket:
 
     def reserve(self, tokens: float = 1.0) -> float:
         """Reserve tokens and return required wait time in seconds."""
+        # Atomically reserve tokens. If sufficient tokens are available this
+        # returns 0.0 (no wait). When the bucket is exhausted we return the
+        # required wait time (in seconds) for the requested tokens to become
+        # available so callers can sleep or schedule accordingly.
         with self._lock:
             now = time.monotonic()
             self._refill_locked(now)
@@ -54,6 +53,8 @@ class _TokenBucket:
             return (-self._tokens) / self._rate
 
     async def acquire_async(self, tokens: float = 1.0) -> float:
+        # Async-friendly wait helper that uses `reserve` and then sleeps for
+        # the required duration if the bucket is currently exhausted.
         wait_for = self.reserve(tokens=tokens)
         if wait_for > 0:
             await asyncio.sleep(wait_for)
@@ -152,6 +153,10 @@ class Dovetail:
 
     @staticmethod
     def _callable_name(func: Any) -> str:
+        # Return a human-friendly callable name for logging / traces. Where
+        # available `__qualname__` is preferred as it often contains class
+        # context (useful for bound methods), otherwise fall back to
+        # `__name__` or the type name.
         if hasattr(func, "__qualname__"):
             return str(getattr(func, "__qualname__"))
         if hasattr(func, "__name__"):

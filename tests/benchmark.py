@@ -36,6 +36,11 @@ Usage:
 
 import argparse
 import asyncio
+import logging
+
+# Module-level logger used when enabling Dovetail trace output from main()
+logger = logging.getLogger("dovetail-benchmark")
+logger.addHandler(logging.NullHandler())
 import statistics
 import time
 from typing import List
@@ -120,14 +125,14 @@ def run_serial(n: int, duration: float) -> List[int]:
     return [sync_io_job(i, duration) for i in range(n)]
 
 
-def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = False, context_manager: bool = True) -> List[int]:
+def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> List[int]:
     """
     Run jobs in parallel using Dovetail's threadpool.
     map_blocking is the idiomatic Dovetail way to scatter work from sync code.
     Expected time: ~duration (all jobs overlap, bounded by max_workers).
     """
     if context_manager:
-        with Dovetail(max_workers=max_workers) as dvt:
+        with Dovetail(max_workers=max_workers, trace=trace, trace_logger=logger, trace_prefix=(trace_prefix or "map_blocking")) as dvt:
             if observe:
                 attach_observers(dvt, "map_blocking")
                 print()
@@ -140,7 +145,7 @@ def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = 
                 print_stats(dvt, "map_blocking")
             return result
 
-    dvt = Dovetail(max_workers=max_workers)
+    dvt = Dovetail(max_workers=max_workers, trace=trace, trace_logger=logger, trace_prefix=(trace_prefix or "map_blocking"))
     if observe:
         attach_observers(dvt, "map_blocking")
         print()  # newline so events don't run onto the progress line
@@ -157,14 +162,14 @@ def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = 
         dvt.shutdown()
 
 
-def run_async_gather(n: int, duration: float, observe: bool = False, context_manager: bool = True) -> List[int]:
+def run_async_gather(n: int, duration: float, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> List[int]:
     """
     Run jobs concurrently using asyncio.gather via Dovetail's schedule.
     Expected time: ~duration (all coroutines interleave in one event loop).
     """
     # Use context-manager form inside the async runner when useful.
     async def _run_with_context():
-        async with Dovetail() as dvt:
+        async with Dovetail(trace=trace, trace_logger=logger, trace_prefix=(trace_prefix or "async_gather")) as dvt:
             if observe:
                 attach_observers(dvt, "async gather")
                 print()
@@ -176,7 +181,7 @@ def run_async_gather(n: int, duration: float, observe: bool = False, context_man
             return result
 
     async def _run_no_context():
-        dvt = Dovetail()
+        dvt = Dovetail(trace=trace, trace_logger=logger, trace_prefix=(trace_prefix or "async_gather"))
         if observe:
             attach_observers(dvt, "async gather")
         try:
@@ -277,19 +282,35 @@ def main():
     parser.add_argument("--duration", type=float, default=DEFAULT_DURATION, help="Job duration (seconds)")
     parser.add_argument("--workers",  type=int,   default=DEFAULT_WORKERS,  help="Max threadpool workers")
     parser.add_argument("--runs",     type=int,   default=DEFAULT_RUNS,     help="Repetitions per mode (median reported)")
-    parser.add_argument("--observe",  action="store_true",                  help="Print live events and stats (tip: use --tasks 5 to keep output readable)")
     parser.add_argument("--context-manager", dest="context_manager", action="store_true", help="Use context-manager form when creating Dovetail instances (default)")
     parser.add_argument("--no-context-manager", dest="context_manager", action="store_false", help="Disable context-manager usage (use manual creation)")
     parser.add_argument("--compare", action="store_true",                help="Compare runs with and without context-manager usage for concurrent modes")
+    parser.add_argument("--observe",  action="store_true",                  help="Print live events and stats (tip: use --tasks 5 to keep output readable)")
+    parser.add_argument("--trace", action="store_true", help="Enable Dovetail internal tracing (debug output)")
     args = parser.parse_args()
 
     n         = args.tasks
     duration  = args.duration
     workers   = args.workers
     runs      = args.runs
-    observe   = args.observe
     context_manager = args.context_manager
     compare = args.compare
+    observe   = args.observe
+    trace = args.trace
+
+    # Configure module-level logger for trace output if requested
+    global logger
+    if trace:
+        # avoid adding duplicate handlers on repeated runs
+        if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+    else:
+        # ensure at least a NullHandler exists
+        if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
+            logger.addHandler(logging.NullHandler())
 
     if observe:
         print("\n  --observe is on: lifecycle events will print live during the last run only.")
@@ -312,28 +333,28 @@ def main():
         label_no = f"map_blocking ({workers} workers) [no-context]"
         label_ctx = f"map_blocking ({workers} workers) [context]"
         if observe and runs > 1:
-            silent_no = [timed(run_map_blocking, n, duration, workers, context_manager=False)[1] for _ in range(runs - 1)]
+            silent_no = [timed(run_map_blocking, n, duration, workers, context_manager=False, trace=trace)[1] for _ in range(runs - 1)]
             print()
-            _, observed_no = timed(run_map_blocking, n, duration, workers, observe=True, context_manager=False)
+            _, observed_no = timed(run_map_blocking, n, duration, workers, context_manager=False, observe=True, trace=trace)
             results[label_no] = statistics.median(silent_no + [observed_no])
 
-            silent_ctx = [timed(run_map_blocking, n, duration, workers, context_manager=True)[1] for _ in range(runs - 1)]
+            silent_ctx = [timed(run_map_blocking, n, duration, workers, context_manager=True, trace=trace)[1] for _ in range(runs - 1)]
             print()
-            _, observed_ctx = timed(run_map_blocking, n, duration, workers, observe=True, context_manager=True)
+            _, observed_ctx = timed(run_map_blocking, n, duration, workers, context_manager=True, observe=True, trace=trace)
             results[label_ctx] = statistics.median(silent_ctx + [observed_ctx])
         else:
-            results[label_no] = median_time(run_map_blocking, runs, n, duration, workers, observe=observe, context_manager=False)
-            results[label_ctx] = median_time(run_map_blocking, runs, n, duration, workers, observe=observe, context_manager=True)
+            results[label_no] = median_time(run_map_blocking, runs, n, duration, workers, context_manager=False, observe=observe, trace=trace)
+            results[label_ctx] = median_time(run_map_blocking, runs, n, duration, workers, context_manager=True, observe=observe, trace=trace)
     else:
         if observe and runs > 1:
             # Run (runs - 1) silent passes, then one observed pass
-            silent = [timed(run_map_blocking, n, duration, workers, context_manager=context_manager)[1] for _ in range(runs - 1)]
+            silent = [timed(run_map_blocking, n, duration, workers, context_manager=context_manager, trace=trace)[1] for _ in range(runs - 1)]
             print()  # newline before live events
-            _, observed = timed(run_map_blocking, n, duration, workers, observe=True, context_manager=context_manager)
+            _, observed = timed(run_map_blocking, n, duration, workers, context_manager=context_manager, observe=True, trace=trace)
             results[f"map_blocking ({workers} workers)"] = statistics.median(silent + [observed])
         else:
             results[f"map_blocking ({workers} workers)"] = median_time(
-                run_map_blocking, runs, n, duration, workers, observe=observe, context_manager=context_manager
+                run_map_blocking, runs, n, duration, workers, context_manager=context_manager, observe=observe, trace=trace
             )
     if compare:
         label_no = f"map_blocking ({workers} workers) [no-context]"
@@ -356,27 +377,27 @@ def main():
         label_no = "async gather [no-context]"
         label_ctx = "async gather [context]"
         if observe and runs > 1:
-            silent_no = [timed(run_async_gather, n, duration, context_manager=False)[1] for _ in range(runs - 1)]
+            silent_no = [timed(run_async_gather, n, duration, context_manager=False, trace=trace)[1] for _ in range(runs - 1)]
             print()
-            _, observed_no = timed(run_async_gather, n, duration, observe=True, context_manager=False)
+            _, observed_no = timed(run_async_gather, n, duration, context_manager=False, observe=True, trace=trace)
             results[label_no] = statistics.median(silent_no + [observed_no])
 
-            silent_ctx = [timed(run_async_gather, n, duration, context_manager=True)[1] for _ in range(runs - 1)]
+            silent_ctx = [timed(run_async_gather, n, duration, context_manager=True, trace=trace)[1] for _ in range(runs - 1)]
             print()
-            _, observed_ctx = timed(run_async_gather, n, duration, observe=True, context_manager=True)
+            _, observed_ctx = timed(run_async_gather, n, duration, context_manager=True, observe=True, trace=trace)
             results[label_ctx] = statistics.median(silent_ctx + [observed_ctx])
         else:
-            results[label_no] = median_time(run_async_gather, runs, n, duration, observe=observe, context_manager=False)
-            results[label_ctx] = median_time(run_async_gather, runs, n, duration, observe=observe, context_manager=True)
+            results[label_no] = median_time(run_async_gather, runs, n, duration, context_manager=False, observe=observe, trace=trace)
+            results[label_ctx] = median_time(run_async_gather, runs, n, duration, context_manager=True, observe=observe, trace=trace)
     else:
         if observe and runs > 1:
-            silent = [timed(run_async_gather, n, duration, context_manager=context_manager)[1] for _ in range(runs - 1)]
+            silent = [timed(run_async_gather, n, duration, context_manager=context_manager, trace=trace)[1] for _ in range(runs - 1)]
             print()
-            _, observed = timed(run_async_gather, n, duration, observe=True, context_manager=context_manager)
+            _, observed = timed(run_async_gather, n, duration, context_manager=context_manager, observe=True, trace=trace)
             results["async gather"] = statistics.median(silent + [observed])
         else:
             results["async gather"] = median_time(
-                run_async_gather, runs, n, duration, observe=observe, context_manager=context_manager
+                run_async_gather, runs, n, duration, context_manager=context_manager, observe=observe, trace=trace
             )
     if compare:
         no_key = "async gather [no-context]"

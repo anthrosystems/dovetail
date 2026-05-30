@@ -11,7 +11,7 @@
 ### Changed
 - Event listeners are now the primary public model for orchestration and observability.
 - Tracing and stats ownership moved into `Events` (`dvt.events.trace*` and `dvt.events.stats()`).
-- README reorganized as a concise overview with links to detailed guides.
+- README reorganised as a concise overview with links to detailed guides.
 
 ### Removed
 - `after_end(...)` event-chaining API.

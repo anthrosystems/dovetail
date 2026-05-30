@@ -17,6 +17,10 @@ class Task:
         self._dovetail = dovetail
 
     def _attach_task_trace(self, task: asyncio.Task, label: str) -> None:
+        # Attach lightweight structured traces to the lifecycle of the
+        # asyncio.Task. These traces are only generated when tracing is
+        # enabled for the parent Dovetail instance to avoid unnecessary
+        # overhead in normal runs.
         if not self._dovetail.events.trace_enabled:
             return
         task_name = task.get_name() if hasattr(task, "get_name") else f"task-{id(task)}"
@@ -53,6 +57,8 @@ class Task:
                         extra={"Label": label, "Error": exc},
                     )
             except Exception as callback_error:
+                # Trace any error raised by the done-callback itself; do not
+                # let it propagate and interfere with the task machinery.
                 self._dovetail.events.trace(f"schedule trace-callback error task={task_name}: {callback_error}")
 
         task.add_done_callback(_on_done)
@@ -65,6 +71,10 @@ class Task:
         function: Optional[str],
         execution_id: str,
     ) -> None:
+        # Emit simple lifecycle events used by consumers interested in
+        # queue/start/done/error notifications. The payload intentionally
+        # contains primitive values where possible so listeners do not need
+        # complex object references.
         payload = {
             "method": method,
             "task": id(task),
@@ -138,6 +148,9 @@ class Task:
         )
         await self._dovetail._acquire_rate_limit(method="to_thread", task=trace_id, function=func_name)
 
+        # Resolve retry/backoff configuration (instance defaults are used if
+        # not provided). The worker `fn` below implements the retry loop and
+        # emits structured traces/events for each attempt.
         retries, retry_backoff = self._resolve_retry_config()
 
         def fn() -> Any:
@@ -197,6 +210,8 @@ class Task:
                         elapsed=elapsed,
                         extra={"Attempt": attempt, "Error": exc},
                     )
+                    # If we've exhausted retries, emit an error event and
+                    # re-raise so the caller sees the exception.
                     if attempt > retries:
                         self._dovetail.events.inc_stat("error")
                         self._dovetail._emit_event(
@@ -213,6 +228,7 @@ class Task:
                         )
                         raise
 
+                    # Exponential backoff before next retry (if configured).
                     sleep_for = retry_backoff * (2 ** (attempt - 1)) if retry_backoff > 0 else 0.0
                     self._dovetail.events.inc_stat("retries")
                     self._dovetail.events.trace_struct(

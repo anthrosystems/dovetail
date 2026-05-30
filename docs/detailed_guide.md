@@ -284,3 +284,11 @@ scheduling.
 > **Takeaway:** `async gather` wins for long-duration I/O (network calls,
 > slow DB queries). `map_blocking` is more predictable for short-duration
 > work or when calling from sync code.
+
+**Context-manager performance note:** In microbenchmarks we observed that
+constructing and using a `Dovetail` instance via the context-manager form
+(`with Dovetail(...) as dvt:`) can be marginally faster for
+`dvt.task.map_blocking(...)` workloads compared to manual creation with an
+explicit `dvt.shutdown()` call. The difference is small and workload-
+dependent; prefer the context-manager for its safety (automatic shutdown on
+exceptions) and the slight performance benefit when applicable.
