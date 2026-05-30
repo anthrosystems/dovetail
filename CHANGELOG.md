@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] - 2026-05-30
+### Added
+- Enhanced tracing capabilities across Dovetail, including richer structured traces and improved trace formatting. (86713ab)
+- Consolidated and expanded documentation into a detailed guide covering tracing and observability. (5885dd1)
+
+### Changed
+- Improvements to internal tracing APIs and documentation clarifications for `Task` and shutdown behavior. (86713ab)
+
 ## [0.2.0] - 2026-04-08
 ### Added
 - Dedicated documentation guides under `docs/`:
