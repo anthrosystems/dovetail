@@ -7,5 +7,19 @@ an executor helper so they control lifetimes and configuration.
 """
 
 from .dovetail import Dovetail
+from ._register import (
+	register,
+	unregister,
+	list_active,
+	shutdown_all,
+	set_app_shutdown_hook,
+)
 
-__all__ = ["Dovetail"]
+__all__ = [
+	"Dovetail",
+	"register",
+	"unregister",
+	"list_active",
+	"shutdown_all",
+	"set_app_shutdown_hook",
+]

@@ -1,3 +1,7 @@
+"""
+Helpers for scheduling and bridging sync/async call sites.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,10 +13,7 @@ from typing import Any, Callable, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .dovetail import Dovetail
 
-
 class Task:
-    """Helpers for scheduling and bridging sync/async call sites."""
-
     def __init__(self, dovetail: "Dovetail") -> None:
         self._dovetail = dovetail
 

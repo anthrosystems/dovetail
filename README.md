@@ -91,11 +91,14 @@ async with Dovetail() as dvt:
 Manual / library patterns (caller-managed ownership):
 
 ```py
-# Manual creation (caller must call shutdown())
-dvt = Dovetail()
+# Manual creation: by default Dovetail will attempt to shutdown on
+# interpreter exit and on SIGINT/SIGTERM. You can opt out by passing
+# `shutdown_on_exit=False` when constructing the instance.
+dvt = Dovetail()  # shutdown_on_exit enabled by default
 try:
   results = dvt.task.map_blocking(fetch, items)
 finally:
+  # explicit shutdown is still allowed and idempotent
   dvt.shutdown()
 
 # Library-author pattern (prefer caller-managed instance when possible)
@@ -106,10 +109,10 @@ def process(items, dvt: Optional[Dovetail] = None):
   return dvt.task.map_blocking(worker, items)
 ```
 
-> **Note:** Call `dvt.shutdown()` to cleanly close the threadpool when the
-> instance is no longer needed. To avoid leaking threads (especially on
-> exceptions), prefer the context-manager form which automatically shuts down
-> resources when the block exits.
+> **Note:** `Dovetail` will, by default, register a best-effort shutdown
+> handler that calls `shutdown()` on interpreter exit and when `SIGINT` or
+> `SIGTERM` are received. This is opt-outable via `shutdown_on_exit=False`.
+> Explicitly calling `dvt.shutdown()` is still supported and idempotent.
 >
 > Sync context manager (recommended for synchronous code):
 > ```python
@@ -152,6 +155,21 @@ def process(items, dvt: Optional[Dovetail] = None):
 - `dvt.events.on_retry(...)` — fires on each retry attempt.
 - `dvt.events.on_cancel(...)` — fires when a task is cancelled.
 - `dvt.events.stats()` — returns cumulative counters: `queued`, `started`, `done`, `error`, `retries`, `throttled`.
+
+**Registry (auto-registration)**
+
+- `dovetail` now exposes a lightweight registry to track active `Dovetail` instances. By default `Dovetail(..., auto_register=True)` will register itself with the package registry so applications can perform coordinated shutdown.
+- Public helpers:
+  - `from dovetail import register, unregister, list_active, shutdown_all, set_app_shutdown_hook`
+  - `register(dvt)` — explicitly register an instance (optional; instances auto-register by default).
+  - `unregister(dvt)` — remove from the registry (useful if you manage shutdown yourself).
+  - `list_active()` — return a list of active (live) instances.
+  - `shutdown_all(wait=True)` — best-effort shutdown of all registered instances (useful for app shutdown hooks).
+  - `set_app_shutdown_hook(fn)` — provide an application-level hook that the registry will call during process exit.
+
+Notes:
+- The registry uses weakrefs and logs a warning if a `Dovetail` is garbage-collected without an explicit `shutdown()` call.
+- To opt-out of auto-registration when creating a `Dovetail`, pass `auto_register=False` to the constructor.
 
 All `dvt.events.on_*` methods accept these optional scope parameters:
 

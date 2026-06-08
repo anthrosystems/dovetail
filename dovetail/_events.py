@@ -1,3 +1,10 @@
+"""
+Register and dispatch lifecycle listeners for task execution events.
+
+Listeners can be global (default) or scoped to either a function target
+or one execution instance target.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,12 +18,6 @@ if TYPE_CHECKING:
 
 
 class Events:
-    """Register and dispatch lifecycle listeners for task execution events.
-
-    Listeners can be global (default) or scoped to either a function target
-    or one execution instance target.
-    """
-
     def __init__(
         self,
         dovetail: "Dovetail",

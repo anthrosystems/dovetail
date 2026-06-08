@@ -11,7 +11,7 @@ events, and cumulative status counters.
 
 from __future__ import annotations
 
-import os, time, logging, itertools
+import os, time, logging, itertools, signal
 import asyncio, threading, concurrent.futures
 from typing import Any, Callable, Optional, Dict
 
@@ -85,6 +85,8 @@ class Dovetail:
         default_timeout: Optional[float] = None,
         default_retries: int = 0,
         default_retry_backoff: float = 0.0,
+        shutdown_on_exit: bool = True,
+        auto_register: bool = True,
     ):
         # An optional event loop to associate with this helper. When None,
         # the currently running loop (at call time) will be used.
@@ -115,6 +117,51 @@ class Dovetail:
         # Shutdown tracking to make shutdown() idempotent and safe
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
+        
+        # Optional automatic shutdown on process exit / signals. When enabled
+        # Dovetail will call `shutdown()` during normal interpreter exit
+        # (atexit) and when SIGINT / SIGTERM are received.
+        self._shutdown_on_exit = bool(shutdown_on_exit)
+        self._orig_signal_handlers: dict[int, object] = {}
+        self._registered_atexit = False
+        if self._shutdown_on_exit:
+            try:
+                import atexit
+
+                atexit.register(self.shutdown)
+                self._registered_atexit = True
+            except Exception:
+                pass
+            # Register simple wrappers for SIGINT / SIGTERM where available.
+            for _sig in (getattr(signal, 'SIGINT', None), getattr(signal, 'SIGTERM', None)):
+                if _sig is None:
+                    continue
+                try:
+                    prev = signal.getsignal(_sig)
+                    # store previous handler so we can chain / restore later
+                    self._orig_signal_handlers[_sig] = prev
+                    signal.signal(_sig, self._signal_handler)
+                except Exception:
+                    # platforms may restrict signal handling (e.g. some windows
+                    # environments) — ignore failures and proceed.
+                    pass
+        
+        # Optional auto-registration with package-level registry. Import
+        # lazily to avoid circular imports when the package is imported.
+        try:
+            if auto_register:
+                from ._register import register as _dovetail_register
+
+                try:
+                    _dovetail_register(self)
+                except Exception:
+                    # Registration must not break construction; log and continue
+                    try:
+                        self.events.trace(f"dovetail: auto-register failed for {self}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def _next_trace_id(self) -> int:
         return next(self._trace_counter)
@@ -179,6 +226,60 @@ class Dovetail:
             # Defensive: shutdown should not raise during cleanup calls
             if self.events.trace_enabled:
                 self.events.trace(f"Shutdown error: {exc}")
+        # If we registered process-level handlers for shutdown, unregister
+        # them now so an explicit call to `shutdown()` undoes our modifications
+        # and avoids double-invocation or surprising behavior for the caller.
+        if self._shutdown_on_exit:
+            try:
+                if getattr(self, "_registered_atexit", False):
+                    try:
+                        import atexit
+
+                        # Python 3.9+: atexit.unregister exists; wrap for safety
+                        if hasattr(atexit, "unregister"):
+                            atexit.unregister(self.shutdown)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Restore previous signal handlers we replaced during init.
+            try:
+                for sig, prev in list(self._orig_signal_handlers.items()):
+                    try:
+                        signal.signal(sig, prev)
+                    except Exception:
+                        pass
+                self._orig_signal_handlers.clear()
+            except Exception:
+                pass
+
+    def _signal_handler(self, signum: int, frame) -> None:
+        # Best-effort: ensure we shutdown resources, then delegate to the
+        # previous signal handler. If the previous handler was the default
+        # action, restore it and re-raise the signal so the process terminates
+        # as expected.
+        try:
+            self.shutdown(wait=True)
+        except Exception:
+            pass
+
+        prev = self._orig_signal_handlers.get(signum)
+        try:
+            if prev in (signal.SIG_IGN, signal.SIG_DFL):
+                # restore default and re-raise the signal
+                signal.signal(signum, prev)
+                try:
+                    os.kill(os.getpid(), signum)
+                except Exception:
+                    raise SystemExit
+            elif callable(prev):
+                try:
+                    prev(signum, frame)
+                except Exception:
+                    pass
+        except Exception:
+            # give up silently — we've already attempted shutdown
+            pass
 
     # Context manager support (sync + async)
     def __enter__(self) -> "Dovetail":

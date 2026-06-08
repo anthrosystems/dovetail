@@ -1,4 +1,5 @@
-"""Centralised, lightweight tracing helpers used by Dovetail.
+"""
+Centralised, lightweight tracing helpers used by Dovetail.
 
 This module contains two convenience helpers used throughout the
 `dovetail` package to produce consistent debug traces. They are deliberately
