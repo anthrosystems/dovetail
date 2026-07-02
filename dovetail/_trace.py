@@ -38,11 +38,10 @@ def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message:
 
     lg = logger or logging.getLogger(str(prefix or "dovetail"))
     current = threading.current_thread()
-    # Include thread name and id to help correlate traces in multi-threaded runs.
-    ident = threading.get_ident()
+    ident = threading.get_ident() # Include thread name and id to help correlate traces in multi-threaded runs.
     native_id = threading.get_native_id() if hasattr(threading, "get_native_id") else None
     if native_id is not None:
-        lg.debug("[%s][python thread=%s#%s|cpu thread=%s] %s", prefix, current.name, ident, native_id, message)
+        lg.debug("[%s][python thread=%s#%s | cpu thread=%s] %s", prefix, current.name, ident, native_id, message)
     else:
         lg.debug("[%s][thread=%s#%s] %s", prefix, current.name, ident, message)
 
