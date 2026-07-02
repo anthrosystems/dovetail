@@ -167,7 +167,7 @@ def run_feature_checks() -> None:
         with Dovetail(default_timeout=0.01) as dvt:
             try:
                 dvt.task.run_blocking(asyncio.sleep(0.05))
-            except TimeoutError:
+            except (TimeoutError, asyncio.TimeoutError):
                 pass
             else:
                 raise AssertionError("run_blocking(timeout) did not raise TimeoutError")
