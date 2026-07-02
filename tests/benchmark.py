@@ -27,6 +27,11 @@ Reading the results table:
                 map_blocking lands near ceil(tasks/workers) because that's how
                 many rounds a bounded threadpool needs.
 
+After the performance comparison, the script also runs a fast feature
+sanity pass covering the current public API: run_blocking, to_thread,
+to_thread_blocking, schedule, map_blocking, events, retries, timeouts,
+rate limiting, and cancellation.
+
 Usage:
   python benchmark.py
   python benchmark.py --tasks 50 --duration 0.05 --workers 10
@@ -37,15 +42,16 @@ Usage:
 import argparse
 import asyncio
 import logging
-
-# Module-level logger used when enabling Dovetail trace output from main()
-logger = logging.getLogger("dovetail-benchmark")
-logger.addHandler(logging.NullHandler())
 import statistics
 import time
 from typing import List
 
 from dovetail import Dovetail
+
+
+# Module-level logger used when enabling Dovetail trace output from main()
+logger = logging.getLogger("dovetail-benchmark")
+logger.addHandler(logging.NullHandler())
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +120,122 @@ def print_stats(dvt: Dovetail, mode_name: str) -> None:
     print(f"\n  [{mode_name}] stats")
     print(f"    queued={s['queued']}  started={s['started']}  done={s['done']}"
           f"  error={s['error']}  retries={s['retries']}  throttled={s['throttled']}")
+
+
+def _expect(condition: bool, label: str) -> None:
+    if not condition:
+        raise AssertionError(label)
+
+
+def _expect_equal(actual, expected, label: str) -> None:
+    if actual != expected:
+        raise AssertionError(f"{label}: expected {expected!r}, got {actual!r}")
+
+
+def run_feature_checks() -> None:
+    """Fast sanity checks for the public Dovetail API surface."""
+
+    def sync_checks() -> None:
+        with Dovetail(max_workers=2) as dvt:
+            _expect_equal(dvt.task.run_blocking(lambda: 41 + 1), 42, "run_blocking(callable)")
+            _expect_equal(
+                dvt.task.to_thread_blocking(lambda value: value + 1, 41),
+                42,
+                "to_thread_blocking(callable)",
+            )
+            _expect_equal(
+                dvt.task.map_blocking(lambda value: value * 2, [1, 2, 3], max_concurrency=2),
+                [2, 4, 6],
+                "map_blocking",
+            )
+            stats = dvt.events.stats()
+            _expect(stats["queued"] >= 4, "sync queued count")
+            _expect(stats["done"] >= 4, "sync done count")
+
+        from dovetail import list_active, unregister
+
+        registry_dvt = Dovetail(shutdown_on_exit=False)
+        try:
+            _expect(
+                any(item is registry_dvt for item in list_active()),
+                "auto-register/list_active",
+            )
+        finally:
+            unregister(registry_dvt)
+            registry_dvt.shutdown()
+
+        with Dovetail(default_timeout=0.01) as dvt:
+            try:
+                dvt.task.run_blocking(asyncio.sleep(0.05))
+            except TimeoutError:
+                pass
+            else:
+                raise AssertionError("run_blocking(timeout) did not raise TimeoutError")
+
+        retry_state = {"count": 0}
+
+        def flaky() -> int:
+            retry_state["count"] += 1
+            if retry_state["count"] < 2:
+                raise RuntimeError("transient failure")
+            return 7
+
+        with Dovetail(default_retries=1, default_retry_backoff=0.0) as dvt:
+            _expect_equal(dvt.task.to_thread_blocking(flaky), 7, "retry success")
+            stats = dvt.events.stats()
+            _expect_equal(retry_state["count"], 2, "retry attempt count")
+            _expect(stats["retries"] >= 1, "retry stat")
+
+    async def async_checks() -> None:
+        async with Dovetail(max_workers=2) as dvt:
+            done_hits: List[str] = []
+            cancel_hits: List[str] = []
+
+            async def async_value() -> str:
+                await asyncio.sleep(0.001)
+                return "async"
+
+            def sync_value() -> str:
+                return "sync"
+
+            dvt.events.on_end(
+                lambda payload: done_hits.append(str(payload.get("function") or "")),
+                function_target=sync_value,
+            )
+            dvt.events.on_cancel(lambda payload: cancel_hits.append(str(payload.get("function") or "")))
+
+            async_result = await dvt.task.to_thread(lambda: "thread")
+            _expect_equal(async_result, "thread", "to_thread")
+
+            scheduled_result = await asyncio.gather(
+                dvt.task.schedule(async_value()),
+                dvt.task.schedule(sync_value),
+            )
+            _expect_equal(scheduled_result, ["async", "sync"], "schedule results")
+
+            async with Dovetail(rate_limit_per_sec=1, rate_limit_burst=1) as limited:
+                limited_hits: List[str] = []
+                limited.events.on_end(lambda payload: limited_hits.append(str(payload.get("function") or "")))
+                limited_results = await asyncio.gather(
+                    limited.task.schedule(lambda: "first"),
+                    limited.task.schedule(lambda: "second"),
+                )
+                _expect_equal(limited_results, ["first", "second"], "rate-limited schedule results")
+                _expect(limited.events.stats()["throttled"] >= 1, "rate limiting stat")
+                _expect_equal(len(limited_hits), 2, "rate-limited completion count")
+
+            cancelling = dvt.task.schedule(asyncio.sleep(0.05))
+            cancelling.cancel()
+            await asyncio.gather(cancelling, return_exceptions=True)
+
+            _expect_equal(done_hits, [sync_value.__qualname__], "function-scoped on_end listener")
+            _expect_equal(len(cancel_hits), 1, "on_cancel listener count")
+            stats = dvt.events.stats()
+            _expect(stats["done"] >= 3, "async done stat")
+            _expect(stats["queued"] >= 4, "async queued stat")
+
+    sync_checks()
+    asyncio.run(async_checks())
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +537,10 @@ def main():
               else f"{results['async gather']*1000:.1f}ms")
 
     print_results(n, duration, results)
+
+    print("  [4/4] feature checks...", end=" ", flush=True)
+    run_feature_checks()
+    print("ok")
 
 
 if __name__ == "__main__":
