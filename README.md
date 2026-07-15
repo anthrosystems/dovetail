@@ -50,11 +50,6 @@ is for the developers who are stuck between "I want parallelism" and "I don't wa
 pip install pydovetail
 ```
 
-> **Note:** The install name is `pydovetail`, but the import name is `dovetail`.
-> ```python
-> from dovetail import Dovetail
-> ```
-
 
 ## Quick Start
 
@@ -63,7 +58,7 @@ Preferred usage: create and manage a `Dovetail` instance with a context manager.
 Sync (recommended for most users):
 
 ```python
-from dovetail import Dovetail
+from pydovetail import Dovetail
 
 with Dovetail(max_workers=8) as dvt:
   # Sync caller -> sync function (blocks)
@@ -160,7 +155,7 @@ def process(items, dvt: Optional[Dovetail] = None):
 
 - `dovetail` now exposes a lightweight registry to track active `Dovetail` instances. By default `Dovetail(..., auto_register=True)` will register itself with the package registry so applications can perform coordinated shutdown.
 - Public helpers:
-  - `from dovetail import register, unregister, list_active, shutdown_all, set_app_shutdown_hook`
+  - `from pydovetail import register, unregister, list_active, shutdown_all, set_app_shutdown_hook`
   - `register(dvt)` — explicitly register an instance (optional; instances auto-register by default).
   - `unregister(dvt)` — remove from the registry (useful if you manage shutdown yourself).
   - `list_active()` — return a list of active (live) instances.

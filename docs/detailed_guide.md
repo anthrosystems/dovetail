@@ -67,7 +67,7 @@ Each method registers a subscription and returns a subscription id.
 
 ```py
 import asyncio
-from dovetail import Dovetail
+from pydovetail import Dovetail
 
 dvt = Dovetail()
 
@@ -159,7 +159,7 @@ Set behavior globally per `Dovetail` instance (defaults shown):
 Example:
 
 ```py
-from dovetail import Dovetail
+from pydovetail import Dovetail
 
 dvt = Dovetail(
   default_retries=2,

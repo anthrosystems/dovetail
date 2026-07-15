@@ -46,7 +46,7 @@ import statistics
 import time
 from typing import List
 
-from dovetail import Dovetail
+from pydovetail import Dovetail
 
 
 # Module-level logger used when enabling Dovetail trace output from main()
@@ -152,7 +152,7 @@ def run_feature_checks() -> None:
             _expect(stats["queued"] >= 4, "sync queued count")
             _expect(stats["done"] >= 4, "sync done count")
 
-        from dovetail import list_active, unregister
+        from pydovetail import list_active, unregister
 
         registry_dvt = Dovetail(shutdown_on_exit=False)
         try:
