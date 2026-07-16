@@ -8,35 +8,85 @@ Compares three execution modes for a batch of I/O-bound tasks:
   2. map_blocking    — Dovetail's bounded threadpool (sync caller)
   3. async gather    — asyncio.gather, fully concurrent (async caller)
 
-Each "task" simulates real I/O work by sleeping for TASK_DURATION seconds,
-which is honest: time.sleep() releases the GIL so threads genuinely run
-in parallel; asyncio.sleep() yields the event loop so coroutines interleave.
+Each "task" simulates real I/O work by sleeping for TASK_DURATION seconds.
+This is representative because:
+
+  - time.sleep() releases the GIL, allowing worker threads to run in parallel.
+  - asyncio.sleep() yields control to the event loop, allowing coroutines to
+    interleave concurrently.
 
 The expected speedup for N tasks each taking T seconds:
-  Serial:   ~N x T
-  Parallel: ~T (all tasks overlap)
+
+  Serial:
+      ~N X T
+
+  map_blocking:
+      ~ceil(N / workers) X T
+
+  async gather:
+      ~T (all tasks overlap)
+
+These are theoretical limits. Real runtimes include scheduling,
+task creation, context switching, interpreter overhead, and shutdown
+costs. Very small task durations can become dominated by framework
+overhead rather than execution time.
 
 Reading the results table:
-  Median time — wall-clock time to complete all tasks, median across --runs
-                runs to smooth out scheduling noise.
-  vs serial   — how many times faster than the plain for-loop. Higher is better.
-                map_blocking at 6.6x means it finished in ~1/6th the serial time.
-  vs ideal    — how close to the physical ceiling you are. The ideal is one task
-                duration (e.g. 100ms), because if all tasks ran simultaneously
-                you'd never wait longer than the slowest one. 1.0x is perfect;
-                map_blocking lands near ceil(tasks/workers) because that's how
-                many rounds a bounded threadpool needs.
+
+  Expected      — theoretical completion time based on the execution model:
+
+                  Serial:
+                      tasks X duration
+
+                  map_blocking:
+                      ceil(tasks / workers) X duration
+
+                  async gather:
+                      duration (all tasks overlap)
+
+
+  Actual        — measured wall-clock time to complete all tasks.
+                  The benchmark reports the median across --runs to reduce
+                  scheduling noise.
+
+
+  Ceiling Hit   — how closely the implementation reached its theoretical
+                  completion limit:
+
+                      Expected / Actual X 100%
+
+                  100% means the implementation reached the predicted
+                  runtime for its execution model.
+
+                  Lower values indicate scheduling overhead, runtime
+                  coordination, or other practical limitations.
+
+
+  Speedup       — improvement compared with the serial baseline:
+
+                      Serial Time / Actual Time
+
+                  A value of 10x means the workload completed ten times
+                  faster than running tasks sequentially.
+
+
+The benchmark also reports the maximum theoretical speedup:
+
+    serial_time / ideal_parallel_time = tasks
+
+This represents the mathematical maximum if every task overlaps
+perfectly with zero scheduling overhead.
+
+For example, 20 fully-overlapping tasks have a maximum theoretical
+speedup of 20x.
 
 After the performance comparison, the script also runs a fast feature
-sanity pass covering the current public API: run_blocking, to_thread,
-to_thread_blocking, schedule, map_blocking, events, retries, timeouts,
-rate limiting, and cancellation.
+sanity pass covering the current public API.
 
 Usage:
   python benchmark.py
   python benchmark.py --tasks 50 --duration 0.05 --workers 10
   python benchmark.py --observe               # show live events + stats
-  python benchmark.py --observe --tasks 5     # keep it readable
 """
 
 import argparse
@@ -243,7 +293,7 @@ def run_feature_checks() -> None:
 # ---------------------------------------------------------------------------
 
 def run_serial(n: int, duration: float) -> List[int]:
-    """Run jobs one at a time in a plain for-loop. Baseline: ~n x duration."""
+    """Run jobs one at a time in a plain for-loop. Baseline: ~n X duration."""
     return [sync_io_job(i, duration) for i in range(n)]
 
 
@@ -349,50 +399,89 @@ def print_results(n: int, duration: float, results: dict) -> None:
     import math
 
     serial_time = results["Serial"]
-    theoretical_min = duration  # all tasks fully overlap
 
-    # Derive worker count from the mode name so we can show the rounds formula.
+    expected = {
+        "Serial": n * duration,
+        "async gather": duration,
+    }
+
     n_workers = next(
-        (int(m.split("(")[1].split(" ")[0]) for m in results if "workers" in m), None
+        (int(m.split("(")[1].split(" ")[0]) for m in results if "workers" in m),
+        None,
     )
 
-    col_w = max(len(m) for m in results) + 2
-    width = col_w + 46
-
-    print()
-    print("  Columns:")
-    print("    Median time — wall-clock time to finish all tasks (median across runs)")
-    print("    vs serial   — speedup over the plain for-loop; higher is better")
-    print("    vs ideal    — distance from the physical ceiling (1.0x means all tasks")
-    print("                  ran simultaneously); map_blocking lands near ceil(tasks/workers)")
     if n_workers:
         rounds = math.ceil(n / n_workers)
-        print(f"                  = ceil({n}/{n_workers}) = {rounds} rounds x {duration*1000:.0f}ms ≈ {rounds * duration * 1000:.0f}ms")
-    print()
-    print("=" * width)
-    print(f"  Dovetail benchmark  |  {n} tasks x {duration*1000:.0f}ms each")
-    print("=" * width)
-    print(f"  {'Mode':<{col_w}} {'Median time':>12}  {'vs serial':>10}  {'vs ideal':>10}")
-    print("  " + "-" * (width - 2))
+        expected[f"map_blocking ({n_workers} workers)"] = rounds * duration
+    else:
+        expected["map_blocking"] = duration
 
-    for mode, elapsed in results.items():
-        speedup = serial_time / elapsed
-        vs_ideal = elapsed / theoretical_min
-        bar_len = int((elapsed / serial_time) * 30)
-        bar = "█" * bar_len
+    col_w = max(len(mode) for mode in results) + 2
+    width = col_w + 70
+
+    theoretical_max_speedup = (n * duration) / duration
+
+    print()
+    print("Columns:")
+    print("     Expected       — theoretical completion time for this execution model")
+    print("     Actual         — measured wall-clock time (median across runs)")
+    print("     Ceiling Hit    — how close the run got to its theoretical limit")
+    print("     Speedup        — improvement compared to serial execution")
+    print()
+
+    if n_workers:
+        rounds = math.ceil(n / n_workers)
         print(
-            f"  {mode:<{col_w}} {elapsed*1000:>10.1f}ms"
-            f"  {speedup:>8.1f}x"
-            f"  {vs_ideal:>8.1f}x"
-            f"  {bar}"
+            f"    map_blocking uses ceil({n}/{n_workers}) = {rounds} rounds "
+            f"x {duration*1000:.0f}ms ≈ {rounds * duration * 1000:.0f}ms"
         )
 
     print()
-    print(f"  Theoretical minimum (all tasks overlap): {theoretical_min*1000:.0f}ms")
-    print(f"  Serial baseline (no concurrency):        {serial_time*1000:.1f}ms")
     print("=" * width)
+    print(f"  Dovetail benchmark  |  {n} tasks X {duration*1000:.0f}ms each")
+    print("=" * width)
+
+    print(
+        f"  {'Mode':<{col_w}}"
+        f" {'Expected':>12}"
+        f" {'Actual':>12}"
+        f" {'Ceiling Hit':>14}"
+        f" {'Speedup':>12}"
+    )
+
+    print("  " + "-" * (width - 2))
+
+    for mode, actual in results.items():
+        target = expected.get(mode, duration)
+
+        ceiling_hit = (target / actual) * 100
+        speedup = serial_time / actual
+
+        print(
+            f"  {mode:<{col_w}}"
+            f" {target*1000:>10.1f}ms"
+            f" {actual*1000:>10.1f}ms"
+            f" {ceiling_hit:>12.1f}%"
+            f" {speedup:>10.1f}x"
+        )
+
+    print()
+    print(f"  Theoretical minimum:          {duration*1000:.0f}ms")
+    print(f"  Maximum theoretical speedup:  {theoretical_max_speedup:.1f}x")
     print()
 
+    print("  Achieved speedup ceiling:")
+    for mode, actual in results.items():
+        if mode == "Serial":
+            continue
+
+        speedup = serial_time / actual
+        ceiling = (speedup / theoretical_max_speedup) * 100
+
+        print(f"    {mode}: {ceiling:.1f}%")
+
+    print("=" * width)
+    print()
 
 # ---------------------------------------------------------------------------
 # Main
@@ -407,7 +496,7 @@ def main():
     parser.add_argument("--context-manager", dest="context_manager", action="store_true", help="Use context-manager form when creating Dovetail instances (default)")
     parser.add_argument("--no-context-manager", dest="context_manager", action="store_false", help="Disable context-manager usage (use manual creation)")
     parser.add_argument("--compare", action="store_true",                help="Compare runs with and without context-manager usage for concurrent modes")
-    parser.add_argument("--observe",  action="store_true",                  help="Print live events and stats (tip: use --tasks 5 to keep output readable)")
+    parser.add_argument("--observe",  action="store_true",                  help="Print live events and stats")
     parser.add_argument("--trace", action="store_true", help="Enable Dovetail internal tracing (debug output)")
     args = parser.parse_args()
 
@@ -437,19 +526,22 @@ def main():
     if observe:
         print("\n  --observe is on: lifecycle events will print live during the last run only.")
         print("  Serial mode has no Dovetail instance so events are not available for it.")
-        print("  For readable output, consider --tasks 5.")
         # Only show events on the final run (median run), not every repetition.
         # We do this by running normally for (runs - 1) and then one observed run.
 
-    print(f"\nWarming up... ({runs} run(s) per mode, reporting median)")
+    print(f"\nWarming up... ({runs} run(s) per mode)")
 
     results = {}
 
-    print("  [1/3] Serial...", end=" ", flush=True)
+    print("  [1/4] Feature checks...", end=" ", flush=True)
+    run_feature_checks()
+    print("ok")
+
+    print("  [2/4] Serial...", end=" ", flush=True)
     results["Serial"] = median_time(run_serial, runs, n, duration)
     print(f"{results['Serial']*1000:.1f}ms")
 
-    print("  [2/3] map_blocking (threadpool)...", end=" ", flush=True)
+    print("  [3/4] map_blocking (threadpool)...", end=" ", flush=True)
     if compare:
         # Run both variants (no-context and context) and record separately
         label_no = f"map_blocking ({workers} workers) [no-context]"
@@ -494,7 +586,7 @@ def main():
         print(f"\n  map_blocking median: {results[f'map_blocking ({workers} workers)']*1000:.1f}ms" if observe
               else f"{results[f'map_blocking ({workers} workers)']*1000:.1f}ms")
 
-    print("  [3/3] async gather...", end=" ", flush=True)
+    print("  [4/4] async gather...", end=" ", flush=True)
     if compare:
         label_no = "async gather [no-context]"
         label_ctx = "async gather [context]"
@@ -537,10 +629,6 @@ def main():
               else f"{results['async gather']*1000:.1f}ms")
 
     print_results(n, duration, results)
-
-    print("  [4/4] feature checks...", end=" ", flush=True)
-    run_feature_checks()
-    print("ok")
 
 
 if __name__ == "__main__":
