@@ -51,6 +51,9 @@ The advantage is **surgical parallelism**:
 
 > Add concurrency to one function without rewriting everything around it.
 
+> Dovetail is intended for developers who are between **"I need concurrency"** and **"I don't want to rewrite my entire application around async"**
+However, if you are starting a new project and are comfortable using async/await everywhere, native asyncio is usually the better choice.
+
 ---
 
 ### Before Dovetail
@@ -126,9 +129,7 @@ def application():
     report = process_report(urls)
 ```
 
-**No async migration.**
-**No rewriting the call stack.**
-**No changing unrelated code.**
+**No async migration. No rewriting the call stack. No changing unrelated code.**
 
 The execution model becomes:
 ```
@@ -144,12 +145,6 @@ Dovetail threadpool
 ```
 
 The same synchronous interface now benefits from parallel execution.
-
----
-
-Dovetail is intended for developers who are between **"I need concurrency"** and **"I don't want to rewrite my entire application around async"**
-
-However, if you are starting a new project and are comfortable using async/await everywhere, native asyncio is usually the better choice.
 
 ---
 
