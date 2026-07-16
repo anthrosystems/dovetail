@@ -11,10 +11,10 @@ A lightweight helper for bridging sync and async code, built on Asyncio & Thread
 - [Features](#features)
 - [Why Dovetail?](#why-dovetail)
 - [Installing Dovetail](#installing-dovetail)
-- [Development](#development)
 - [Quick Start](#quick-start)
 - [API Summary & Guide](docs/api.md)
 - [Benchmarks](docs/benchmarks.md)
+- [Development](#development)
 - [License](#license)
 
 ## Features
@@ -162,16 +162,6 @@ Dovetail has no runtime dependencies outside Python's standard library.
 pip install pydovetail
 ```
 
-## Development
-
-Run tests locally:
-
-```bash
-python -m pytest -q
-```
-
-Contributions are welcome, please open an issue or PR.
-
 
 ## Quick Start
 
@@ -225,6 +215,18 @@ def process(items, dvt: Optional[Dovetail] = None):
       return _dvt.task.map_blocking(worker, items)
   return dvt.task.map_blocking(worker, items)
 ```
+
+---
+
+## Development
+
+Run tests locally:
+
+```bash
+python -m pytest -q
+```
+
+Contributions are welcome, please open an issue or PR.
 
 ---
 
