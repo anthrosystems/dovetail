@@ -34,11 +34,15 @@ jobs:
 
       - name: Lint
         run: |
-          python -m ruff check tests/benchmark.py
+          python -m ruff check tests/test.py tests/benchmark.py
+
+      - name: Run test suite
+        run: |
+          python tests/test.py
 
       - name: Benchmark smoke test
         run: |
-          python tests/benchmark.py --tasks 2 --duration 0.001 --workers 2 --runs 1
+          python tests/benchmark.py --tasks 10000 --duration 0.001 --workers 100 --runs 3
 
       - name: Build distributions
         run: |

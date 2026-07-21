@@ -9,9 +9,10 @@ leaked pools.
 from __future__ import annotations
 
 import threading
-import weakref
 import logging
-from typing import Callable, Iterable, List, Optional
+import weakref
+
+from typing import Callable, List, Optional
 
 _log = logging.getLogger(__name__)
 
@@ -39,20 +40,6 @@ class _Registry:
             wr = weakref.ref(dvt, _on_dead)
             self._items.add(wr)
 
-        # Attach a finaliser to warn if object is GC'd without shutdown
-        try:
-            def _finalize_check(obj):
-                try:
-                    if getattr(obj, "_shutdown", False):
-                        return
-                    _log.warning("Dovetail instance %r was garbage collected without shutdown()", obj)
-                except Exception:
-                    pass
-
-            weakref.finalize(dvt, _finalize_check, dvt)
-        except Exception:
-            pass
-
     def unregister(self, dvt) -> None:
         with self._lock:
             for wr in list(self._items):
@@ -61,16 +48,25 @@ class _Registry:
 
     def list_active(self) -> List:
         with self._lock:
-            return [wr() for wr in self._items if wr() is not None]
+            items = []
+
+            for wr in list(self._items):
+                obj = wr()
+                if obj is not None:
+                    items.append(obj)
+
+            return items
 
     def shutdown_all(self, wait: bool = True) -> None:
         # Best-effort shutdown of all active Dovetail instances.
-        items = self.list_active()
-        for dvt in items:
+        for dvt in self.list_active():
             try:
                 dvt.shutdown(wait=wait)
             except Exception:
-                _log.exception("Error shutting down Dovetail instance %r", dvt)
+                _log.exception(
+                    "Error shutting down Dovetail instance %r",
+                    dvt,
+                )
 
     def set_app_shutdown_hook(self, fn: Optional[Callable[[], None]]) -> None:
         with self._lock:

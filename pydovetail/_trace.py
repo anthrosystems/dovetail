@@ -36,16 +36,18 @@ def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message:
     if not enabled:
         return
     
-    prefix = F"DVT-{prefix}" # Add "DVT-" to prefix for clarity.
+    prefix = str(prefix or "Dovetail")
+    display_prefix = f"DVT-{prefix}"
 
-    lg = logger or logging.getLogger(str(prefix or "dovetail"))
+    lg = logger or logging.getLogger(prefix)
+    
     current = threading.current_thread()
     ident = threading.get_ident() # Include thread name and id to help correlate traces in multi-threaded runs.
     native_id = threading.get_native_id() if hasattr(threading, "get_native_id") else None
     if native_id is not None:
-        lg.debug("[%s][python thread=%s#%s | cpu thread=%s] %s", prefix, current.name, ident, native_id, message)
+        lg.debug("[%s][python thread=%s#%s | cpu thread=%s] %s", display_prefix, current.name, ident, native_id, message)
     else:
-        lg.debug("[%s][thread=%s#%s] %s", prefix, current.name, ident, message)
+        lg.debug("[%s][thread=%s#%s] %s", display_prefix, current.name, ident, message)
 
 
 def trace_struct(
@@ -68,9 +70,10 @@ def trace_struct(
     if not enabled:
         return
     
-    prefix = F"DVT-{prefix}" # Add "DVT-" to prefix for clarity.
+    prefix = str(prefix or "Dovetail")
+    display_prefix = f"DVT-{prefix}"
 
-    lg = logger or logging.getLogger(str(prefix or "dovetail"))
+    lg = logger or logging.getLogger(prefix)
     current = threading.current_thread()
 
     # Build the trace record as lines, then emit once. This avoids multiple
@@ -78,9 +81,9 @@ def trace_struct(
     ident = threading.get_ident()
     native_id = threading.get_native_id() if hasattr(threading, "get_native_id") else None
     if native_id is not None:
-        lines = [f"[{prefix}] Python Thread: {current.name}#{ident} (CPU Thread #{native_id}):"]
+        lines = [f"[{display_prefix}] Python Thread: {current.name}#{ident} (CPU Thread #{native_id}):"]
     else:
-        lines = [f"[{prefix}] Thread: {current.name}#{ident}:"]
+        lines = [f"[{display_prefix}] Thread: {current.name}#{ident}:"]
 
     detail_parts = []
     if task is not None:

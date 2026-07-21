@@ -11,6 +11,8 @@ import asyncio
 import itertools
 import logging
 import threading
+import weakref
+
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -20,7 +22,7 @@ if TYPE_CHECKING:
 class Events:
     def __init__(
         self,
-        dovetail: "Dovetail",
+        dovetail: "weakref.ReferenceType[Dovetail]",
         *,
         trace_enabled: bool = False,
         trace_logger: Optional[logging.Logger] = None,
@@ -41,14 +43,21 @@ class Events:
 
         # Mapping of event name -> subscription id -> callback. Subscriptions
         # metadata is stored separately to allow efficient matching logic.
-        self._listeners_global: Dict[str, Dict[str, Callable[[Dict[str, Any]], None]]] = {}
+        self._listeners: Dict[str, Dict[str, Callable[[Dict[str, Any]], None]]] = {}
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
 
         # Tracing configuration: feature flag and optional logger/prefix.
         # These are small and cheap to check from hot paths; the actual heavy
         # formatting is delegated to `_trace` helpers.
         self._trace_enabled = bool(trace_enabled)
-        self._trace_logger = trace_logger or logging.getLogger("dovetail")
+
+        if trace_logger is None:
+            log = logging.getLogger("dovetail")
+            log.propagate = True
+            self._trace_logger = log
+        else:
+            self._trace_logger = trace_logger
+
         self._trace_prefix = str(trace_prefix or "Dovetail")
 
         # Counters for cumulative statistics (queued/started/done/etc.). We
@@ -64,6 +73,13 @@ class Events:
             "throttled": 0,
         }
 
+    @property
+    def dovetail(self) -> "Dovetail":
+        dvt = self._dovetail()
+        if dvt is None:
+            raise RuntimeError("Dovetail instance has been garbage collected")
+        return dvt
+    
     @property
     def trace_enabled(self) -> bool:
         """Whether structured trace logging is enabled for this Dovetail instance."""
@@ -124,7 +140,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -133,7 +149,7 @@ class Events:
         Rules:
         - no target => global watcher
         - function_target only => all instances of one function
-        - instance_target only => one specific execution
+        - execution_target only => one specific execution
         - both set => ValueError
         """
         if not callable(callback):
@@ -141,25 +157,25 @@ class Events:
         event_name = str(event or "").strip()
         if not event_name:
             raise ValueError("event cannot be empty")
-        if function_target is not None and instance_target is not None:
-            raise ValueError("function_target and instance_target are mutually exclusive")
+        if function_target is not None and execution_target is not None:
+            raise ValueError("function_target and execution_target are mutually exclusive")
         if int(max_chain_depth) < 1:
             raise ValueError("max_chain_depth must be >= 1")
 
         # Create a subscription id and record matching metadata.
         sub_id = f"sub-{next(self._event_counter)}"
         function_key = self._function_scope_key(function_target) if function_target is not None else None
-        instance_key = self._instance_scope_key(instance_target) if instance_target is not None else None
+        instance_key = self._instance_scope_key(execution_target) if execution_target is not None else None
 
         # Registration performed under `_lock` so the listener tables are
         # always consistent when concurrently emitting events.
         with self._lock:
-            self._listeners_global.setdefault(event_name, {})[sub_id] = callback
+            self._listeners.setdefault(event_name, {})[sub_id] = callback
             self._subscriptions[sub_id] = {
                 "subscription_id": sub_id,
                 "event": event_name,
                 "function_target": function_key,
-                "instance_target": instance_key,
+                "execution_target": instance_key,
                 "allow_reentry": bool(allow_reentry),
                 "max_chain_depth": int(max_chain_depth),
                 "active_depth": 0,
@@ -171,7 +187,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -184,7 +200,7 @@ class Events:
             "task_queued",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -194,7 +210,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -207,7 +223,30 @@ class Events:
             "task_started",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
+            allow_reentry=allow_reentry,
+            max_chain_depth=max_chain_depth,
+        )
+    
+    def on_rate_limited(
+        self,
+        callback: Callable[[Dict[str, Any]], None],
+        *,
+        function_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
+        allow_reentry: bool = False,
+        max_chain_depth: int = 5,
+    ) -> str:
+        """Register a callback for rate-limit throttling events.
+
+        Callback receives the emitted payload dictionary.
+        Returns a subscription id.
+        """
+        return self._register_listener(
+            "task_rate_limited",
+            callback,
+            function_target=function_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -217,7 +256,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -230,7 +269,7 @@ class Events:
             "task_retry",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -240,7 +279,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -253,7 +292,7 @@ class Events:
             "task_error",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -263,7 +302,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -276,7 +315,7 @@ class Events:
             "task_cancelled",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -286,7 +325,7 @@ class Events:
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
-        instance_target: Optional[Any] = None,
+        execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -299,7 +338,7 @@ class Events:
             "task_done",
             callback,
             function_target=function_target,
-            instance_target=instance_target,
+            execution_target=execution_target,
             allow_reentry=allow_reentry,
             max_chain_depth=max_chain_depth,
         )
@@ -322,7 +361,7 @@ class Events:
         # callback invocation which could lead to deadlocks if callbacks
         # register/unregister listeners.
         with self._lock:
-            global_listeners = list(self._listeners_global.get(event_name, {}).items())
+            global_listeners = list(self._listeners.get(event_name, {}).items())
 
         # First pass: filter the snapshot to the set of listeners that
         # should receive this event. We consult subscription metadata for
@@ -336,7 +375,7 @@ class Events:
                 # Subscription removed concurrently.
                 continue
             sub_function = sub.get("function_target")
-            sub_instance = sub.get("instance_target")
+            sub_instance = sub.get("execution_target")
             if sub_function is not None and sub_function != function_key:
                 continue
             if sub_instance is not None and sub_instance != instance_key:

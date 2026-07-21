@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os, time, logging, itertools, signal
 import asyncio, threading, concurrent.futures
+import weakref
+
 from typing import Any, Callable, Optional, Dict
 
 from ._events import Events
@@ -82,9 +84,9 @@ class Dovetail:
         trace_prefix: str = "Dovetail",
         rate_limit_per_sec: Optional[float] = None,
         rate_limit_burst: Optional[float] = None,
-        default_timeout: Optional[float] = None,
-        default_retries: int = 0,
-        default_retry_backoff: float = 0.0,
+        timeout: Optional[float] = None,
+        retries: int = 0,
+        retry_backoff: float = 0.0,
         shutdown_on_exit: bool = True,
         auto_register: bool = True,
     ):
@@ -99,24 +101,31 @@ class Dovetail:
         trace_enabled = bool(trace) or trace_env in ("1", "true", "yes", "on")
         self._trace_counter = itertools.count(1)
         self._execution_counter = itertools.count(1)
-        self._default_timeout = float(default_timeout) if default_timeout is not None else None
-        self._default_retries = max(0, int(default_retries or 0))
-        self._default_retry_backoff = max(0.0, float(default_retry_backoff or 0.0))
+        self._default_timeout = float(timeout) if timeout is not None else None
+        self._default_retries = max(0, int(retries or 0))
+        self._default_retry_backoff = max(0.0, float(retry_backoff or 0.0))
         self._rate_limiter = None
         if rate_limit_per_sec is not None:
             self._rate_limiter = _TokenBucket(rate_per_sec=float(rate_limit_per_sec), burst=rate_limit_burst)
 
         # Expose helpers bound to this Dovetail instance.
         self.events = Events(
-            self,
+            weakref.ref(self),
             trace_enabled=trace_enabled,
             trace_logger=trace_logger,
             trace_prefix=trace_prefix,
         )
+
         self.task = Task(self)
+        
         # Shutdown tracking to make shutdown() idempotent and safe
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
+        self._finalizer = weakref.finalize(
+            self,
+            Dovetail._finalize_warning,
+            trace_logger,
+        )
         
         # Optional automatic shutdown on process exit / signals. When enabled
         # Dovetail will call `shutdown()` during normal interpreter exit
@@ -124,14 +133,23 @@ class Dovetail:
         self._shutdown_on_exit = bool(shutdown_on_exit)
         self._orig_signal_handlers: dict[int, object] = {}
         self._registered_atexit = False
+        self._atexit_callback = None
+
         if self._shutdown_on_exit:
             try:
                 import atexit
 
-                atexit.register(self.shutdown)
+                self._atexit_callback = (
+                    Dovetail._atexit_shutdown,
+                    weakref.ref(self),
+                )
+
+                atexit.register(*self._atexit_callback)
                 self._registered_atexit = True
+
             except Exception:
                 pass
+            
             # Register simple wrappers for SIGINT / SIGTERM where available.
             for _sig in (getattr(signal, 'SIGINT', None), getattr(signal, 'SIGTERM', None)):
                 if _sig is None:
@@ -148,20 +166,9 @@ class Dovetail:
         
         # Optional auto-registration with package-level registry. Import
         # lazily to avoid circular imports when the package is imported.
-        try:
-            if auto_register:
-                from ._register import register as _dovetail_register
-
-                try:
-                    _dovetail_register(self)
-                except Exception:
-                    # Registration must not break construction; log and continue
-                    try:
-                        self.events.trace(f"dovetail: auto-register failed for {self}")
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+        if auto_register:
+            from ._register import register as _dovetail_register
+            _dovetail_register(self)
 
     def _next_trace_id(self) -> int:
         return next(self._trace_counter)
@@ -209,47 +216,77 @@ class Dovetail:
         if hasattr(func, "__name__"):
             return str(getattr(func, "__name__"))
         return type(func).__name__
+
+    @staticmethod
+    def _finalize_warning(logger):
+        if logger:
+            logger.warning(
+                "Dovetail instance was garbage collected without shutdown()"
+            )
+    
+    @staticmethod
+    def _atexit_shutdown(ref):
+        dvt = ref()
+        if dvt is not None:
+            dvt.shutdown()
         
     def shutdown(self, wait: bool = True) -> None:
         """Shut down the internal threadpool executor."""
-        # Make shutdown idempotent and thread-safe.
-        with self._shutdown_lock:
-            if self._shutdown:
-                return
-            self._shutdown = True
-
-        if self.events.trace_enabled:
-            self.events.trace(f"Shutdown (wait={wait})")
         try:
-            self._threadpool.shutdown(wait=wait)
-        except Exception as exc:
-            # Defensive: shutdown should not raise during cleanup calls
-            if self.events.trace_enabled:
-                self.events.trace(f"Shutdown error: {exc}")
-        # If we registered process-level handlers for shutdown, unregister
-        # them now so an explicit call to `shutdown()` undoes our modifications
-        # and avoids double-invocation or surprising behavior for the caller.
-        if self._shutdown_on_exit:
-            try:
-                if getattr(self, "_registered_atexit", False):
-                    try:
-                        import atexit
+            # Make shutdown idempotent and thread-safe.
+            with self._shutdown_lock:
+                if self._shutdown:
+                    return
 
-                        # Python 3.9+: atexit.unregister exists; wrap for safety
-                        if hasattr(atexit, "unregister"):
-                            atexit.unregister(self.shutdown)
-                    except Exception:
-                        pass
+                self._shutdown = True
+
+            # Prevent the GC warning because shutdown happened explicitly.
+            try:
+                if self._finalizer.alive:
+                    self._finalizer.detach()
             except Exception:
                 pass
-            # Restore previous signal handlers we replaced during init.
+
+            if self.events.trace_enabled:
+                self.events.trace(f"Shutdown (wait={wait})")
             try:
-                for sig, prev in list(self._orig_signal_handlers.items()):
-                    try:
-                        signal.signal(sig, prev)
-                    except Exception:
-                        pass
-                self._orig_signal_handlers.clear()
+                self._threadpool.shutdown(wait=wait)
+            except Exception as exc:
+                # Defensive: shutdown should not raise during cleanup calls
+                if self.events.trace_enabled:
+                    self.events.trace(f"Shutdown error: {exc}")
+            # If we registered process-level handlers for shutdown, unregister
+            # them now so an explicit call to `shutdown()` undoes our modifications
+            # and avoids double-invocation or surprising behavior for the caller.
+            if self._shutdown_on_exit:
+                try:
+                    if self._registered_atexit and self._atexit_callback:
+                        import atexit
+
+                        if hasattr(atexit, "unregister"):
+                            atexit.unregister(self._atexit_callback[0])
+
+                        self._registered_atexit = False
+                        self._atexit_callback = None
+
+                except Exception:
+                    pass
+                
+                # Restore previous signal handlers we replaced during init.
+                try:
+                    for sig, prev in list(self._orig_signal_handlers.items()):
+                        try:
+                            signal.signal(sig, prev)
+                        except Exception:
+                            pass
+                    self._orig_signal_handlers.clear()
+                except Exception:
+                    pass
+        finally:
+            # Remove this instance from the global registry.
+            try:
+                from ._register import unregister as _dovetail_unregister
+                _dovetail_unregister(self)
             except Exception:
                 pass
 
@@ -280,7 +317,7 @@ class Dovetail:
         except Exception:
             # give up silently — we've already attempted shutdown
             pass
-
+    
     # Context manager support (sync + async)
     def __enter__(self) -> "Dovetail":
         return self
@@ -300,3 +337,8 @@ class Dovetail:
         except RuntimeError:
             # No running loop; fallback to direct call
             self.shutdown(wait=True)
+    
+    @property
+    def is_shutdown(self) -> bool:
+        """Whether this Dovetail instance has been shut down."""
+        return self._shutdown

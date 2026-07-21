@@ -1,15 +1,13 @@
 # Dovetail - Sync / Async wrapper for Python.
 
-[![CI](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml) 
-[![PyPI version](https://img.shields.io/pypi/v/dovetail.svg)](https://pypi.org/project/pydovetail/) 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dovetail.svg)](https://github.com/anthrosystems/dovetail/releases/latest)
+[![CI](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![PyPI version](https://img.shields.io/pypi/v/pydovetail.svg)](https://pypi.org/project/pydovetail/) [![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dovetail.svg)](https://github.com/anthrosystems/dovetail/releases/latest)
 
 A lightweight helper for bridging sync and async code, built on Asyncio & ThreadPoolExecutor.
 
 ## Table of Contents
 - [Features](#features)
 - [Why Dovetail?](#why-dovetail)
+- [Design Goals](#design-goals)
 - [Installing Dovetail](#installing-dovetail)
 - [Quick Start](#quick-start)
 - [API Summary & Guide](docs/api.md)
@@ -19,8 +17,8 @@ A lightweight helper for bridging sync and async code, built on Asyncio & Thread
 
 ## Features
 
-- Run async code from synchronous applications.
-- Run blocking functions from async applications.
+- Run blocking functions from async applications using the threadpool.
+- Run async functions from synchronous applications.
 - Bounded threadpool execution.
 - Ordered parallel mapping.
 - Built-in retries and exponential backoff.
@@ -39,20 +37,9 @@ calling it has to become `async`, and so on until your entire codebase has been
 rewritten around it.
 
 If you're adding parallelism to an existing project, or only want to optimise
-one bottleneck, rewriting the entire call chain is often unnecessary.
+one bottleneck, rewriting the entire call chain is often unnecessary. Dovetail solves this by allowing synchronous applications to use asynchronous execution patterns without forcing an async migration.
 
-Dovetail solves this by allowing synchronous applications to use asynchronous
-execution patterns without forcing an async migration.
-
-Dovetail's advantage is not raw performance. Native asyncio will always be at
-least as fast because Dovetail is built on top of it.
-
-The advantage is **surgical parallelism**:
-
-> Add concurrency to one function without rewriting everything around it.
-
-> Dovetail is intended for developers who are between **"I need concurrency"** and **"I don't want to rewrite my entire application around async"**
-However, if you are starting a new project and are comfortable using async/await everywhere, native asyncio is usually the better choice.
+> Dovetail is not intended to outperform native asyncio. Native asyncio gives the most direct control and lowest overhead when an application can be written around async/await. Dovetail's advantage is reducing migration cost: it lets existing synchronous applications introduce concurrency incrementally.
 
 ---
 
@@ -117,7 +104,6 @@ Dovetail lets you add concurrency only where you need it:
 from pydovetail import Dovetail
 
 with Dovetail(max_workers=20) as dvt:
-
     def process_report(urls):
         results = dvt.task.map_blocking(fetch_url, urls)
         return summarise(results)
@@ -148,10 +134,25 @@ The same synchronous interface now benefits from parallel execution.
 
 ---
 
+## Design Goals
+
+Dovetail prioritises:
+
+- Minimal adoption cost.
+- Incremental concurrency.
+- Safe lifecycle management.
+- Observable execution.
+
+Dovetail intentionally does not replace asyncio. It provides a bridge for
+projects where a full async migration is impractical.
+
+---
+
 ## Installing Dovetail
 
 ### Requirements:
 - Python 3.9+
+- CPython recommended
 - asyncio
 - ThreadPoolExecutor (standard library)
 
@@ -234,4 +235,4 @@ Contributions are welcome, please open an issue or PR.
 
 Dovetail is released under the MIT License.
 
-See [LICENSE](LICENSE) for details.
+See **[LICENSE](LICENSE)** for details.

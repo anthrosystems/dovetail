@@ -8,6 +8,8 @@ import asyncio
 import functools
 import inspect
 import time
+import weakref
+
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,17 +17,24 @@ if TYPE_CHECKING:
 
 class Task:
     def __init__(self, dovetail: "Dovetail") -> None:
-        self._dovetail = dovetail
+        self._dovetail = weakref.ref(dovetail)
+    
+    @property
+    def dovetail(self) -> "Dovetail":
+        dvt = self._dovetail()
+        if dvt is None:
+            raise RuntimeError("Dovetail instance has been garbage collected")
+        return dvt
 
     def _attach_task_trace(self, task: asyncio.Task, label: str) -> None:
         # Attach lightweight structured traces to the lifecycle of the
         # asyncio.Task. These traces are only generated when tracing is
         # enabled for the parent Dovetail instance to avoid unnecessary
         # overhead in normal runs.
-        if not self._dovetail.events.trace_enabled:
+        if not self.dovetail.events.trace_enabled:
             return
         task_name = task.get_name() if hasattr(task, "get_name") else f"task-{id(task)}"
-        self._dovetail.events.trace_struct(
+        self.dovetail.events.trace_struct(
             method="schedule",
             status="Created",
             task=task_name,
@@ -35,7 +44,7 @@ class Task:
         def _on_done(done_task: asyncio.Task) -> None:
             try:
                 if done_task.cancelled():
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="schedule",
                         status="Cancelled",
                         task=task_name,
@@ -44,14 +53,14 @@ class Task:
                     return
                 exc = done_task.exception()
                 if exc is None:
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="schedule",
                         status="Done",
                         task=task_name,
                         extra={"Label": label},
                     )
                 else:
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="schedule",
                         status="Error",
                         task=task_name,
@@ -60,7 +69,7 @@ class Task:
             except Exception as callback_error:
                 # Trace any error raised by the done-callback itself; do not
                 # let it propagate and interfere with the task machinery.
-                self._dovetail.events.trace(f"schedule trace-callback error task={task_name}: {callback_error}")
+                self.dovetail.events.trace(f"schedule trace-callback error task={task_name}: {callback_error}")
 
         task.add_done_callback(_on_done)
 
@@ -85,13 +94,12 @@ class Task:
         # Update cumulative counters for coroutine-based tasks so stats()
         # reflect scheduled/started work (other paths already increment).
         try:
-            self._dovetail.events.inc_stat("queued")
-            self._dovetail.events.inc_stat("started")
+            self.dovetail.events.inc_stat("queued")
         except Exception:
             # Be defensive: stats updating must not break scheduling.
             pass
-        self._dovetail._emit_event("task_queued", payload)
-        self._dovetail._emit_event("task_started", payload)
+        self.dovetail._emit_event("task_queued", payload)
+        self.dovetail._emit_event("task_started", payload)
 
         def _on_done(done_task: asyncio.Task) -> None:
             done_payload = {
@@ -101,22 +109,22 @@ class Task:
                 "execution_id": execution_id,
             }
             if done_task.cancelled():
-                self._dovetail._emit_event("task_cancelled", done_payload)
+                self.dovetail._emit_event("task_cancelled", done_payload)
                 return
             exc = done_task.exception()
             if exc is None:
                 try:
-                    self._dovetail.events.inc_stat("done")
+                    self.dovetail.events.inc_stat("done")
                 except Exception:
                     pass
-                self._dovetail._emit_event("task_done", done_payload)
+                self.dovetail._emit_event("task_done", done_payload)
             else:
                 try:
-                    self._dovetail.events.inc_stat("error")
+                    self.dovetail.events.inc_stat("error")
                 except Exception:
                     pass
                 done_payload["error"] = exc
-                self._dovetail._emit_event("task_error", done_payload)
+                self.dovetail._emit_event("task_error", done_payload)
 
         task.add_done_callback(_on_done)
 
@@ -126,28 +134,28 @@ class Task:
         backoff: Optional[float] = None,
     ) -> tuple[int, float]:
         """Resolve retry count and backoff, falling back to Dovetail defaults."""
-        resolved_retries = self._dovetail._default_retries if retries is None else int(retries)
-        resolved_backoff = self._dovetail._default_retry_backoff if backoff is None else float(backoff)
+        resolved_retries = self.dovetail._default_retries if retries is None else int(retries)
+        resolved_backoff = self.dovetail._default_retry_backoff if backoff is None else float(backoff)
         return max(0, resolved_retries), max(0.0, resolved_backoff)
 
     async def to_thread(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run a blocking callable in the threadpool and return its result."""
         loop = asyncio.get_running_loop()
-        trace_id = self._dovetail._next_trace_id()
-        execution_id = self._dovetail._next_execution_id()
-        func_name = self._dovetail._callable_name(func)
-        self._dovetail.events.trace_struct(
+        trace_id = self.dovetail._next_trace_id()
+        execution_id = self.dovetail._next_execution_id()
+        func_name = self.dovetail._callable_name(func)
+        self.dovetail.events.trace_struct(
             method="to_thread",
             status="Queued",
             task=trace_id,
             function=func_name,
         )
-        self._dovetail.events.inc_stat("queued")
-        self._dovetail._emit_event(
+        self.dovetail.events.inc_stat("queued")
+        self.dovetail._emit_event(
             "task_queued",
             {"method": "to_thread", "task": trace_id, "function": func_name, "execution_id": execution_id},
         )
-        await self._dovetail._acquire_rate_limit(method="to_thread", task=trace_id, function=func_name)
+        await self.dovetail._acquire_rate_limit(method="to_thread", task=trace_id, function=func_name)
 
         # Resolve retry/backoff configuration (instance defaults are used if
         # not provided). The worker `fn` below implements the retry loop and
@@ -158,15 +166,15 @@ class Task:
             attempt = 0
             while True:
                 attempt += 1
-                self._dovetail.events.trace_struct(
+                self.dovetail.events.trace_struct(
                     method="to_thread",
                     status="Start",
                     task=trace_id,
                     function=func_name,
                     extra={"Attempt": attempt},
                 )
-                self._dovetail.events.inc_stat("started")
-                self._dovetail._emit_event(
+                self.dovetail.events.inc_stat("started")
+                self.dovetail._emit_event(
                     "task_started",
                     {
                         "method": "to_thread",
@@ -180,7 +188,7 @@ class Task:
                 try:
                     result = func(*args, **kwargs)
                     elapsed = time.perf_counter() - started_at
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="to_thread",
                         status="Done",
                         task=trace_id,
@@ -188,8 +196,8 @@ class Task:
                         elapsed=elapsed,
                         extra={"Attempt": attempt},
                     )
-                    self._dovetail.events.inc_stat("done")
-                    self._dovetail._emit_event(
+                    self.dovetail.events.inc_stat("done")
+                    self.dovetail._emit_event(
                         "task_done",
                         {
                             "method": "to_thread",
@@ -203,7 +211,7 @@ class Task:
                     return result
                 except Exception as exc:
                     elapsed = time.perf_counter() - started_at
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="to_thread",
                         status="Error",
                         task=trace_id,
@@ -214,8 +222,8 @@ class Task:
                     # If we've exhausted retries, emit an error event and
                     # re-raise so the caller sees the exception.
                     if attempt > retries:
-                        self._dovetail.events.inc_stat("error")
-                        self._dovetail._emit_event(
+                        self.dovetail.events.inc_stat("error")
+                        self.dovetail._emit_event(
                             "task_error",
                             {
                                 "method": "to_thread",
@@ -231,15 +239,15 @@ class Task:
 
                     # Exponential backoff before next retry (if configured).
                     sleep_for = retry_backoff * (2 ** (attempt - 1)) if retry_backoff > 0 else 0.0
-                    self._dovetail.events.inc_stat("retries")
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.inc_stat("retries")
+                    self.dovetail.events.trace_struct(
                         method="to_thread",
                         status="Retry",
                         task=trace_id,
                         function=func_name,
                         extra={"Attempt": attempt, "Sleep": f"{sleep_for:.3f}s", "Error": exc},
                     )
-                    self._dovetail._emit_event(
+                    self.dovetail._emit_event(
                         "task_retry",
                         {
                             "method": "to_thread",
@@ -254,22 +262,22 @@ class Task:
                     if sleep_for > 0:
                         time.sleep(sleep_for)
 
-        future = loop.run_in_executor(self._dovetail._threadpool, fn)
-        timeout = self._dovetail._default_timeout
+        future = loop.run_in_executor(self.dovetail._threadpool, fn)
+        timeout = self.dovetail._default_timeout
         if timeout is None or timeout <= 0:
             return await future
         try:
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
-            self._dovetail.events.inc_stat("error")
-            self._dovetail.events.trace_struct(
+            self.dovetail.events.inc_stat("error")
+            self.dovetail.events.trace_struct(
                 method="to_thread",
                 status="Timeout",
                 task=trace_id,
                 function=func_name,
                 elapsed=timeout,
             )
-            self._dovetail._emit_event(
+            self.dovetail._emit_event(
                 "task_error",
                 {
                     "method": "to_thread",
@@ -299,8 +307,8 @@ class Task:
             return []
 
         workers = len(items_list) if max_concurrency is None else max(1, int(max_concurrency or 1))
-        func_name = self._dovetail._callable_name(func)
-        self._dovetail.events.trace_struct(
+        func_name = self.dovetail._callable_name(func)
+        self.dovetail.events.trace_struct(
             method="map_blocking",
             status="Start",
             function=func_name,
@@ -329,7 +337,7 @@ class Task:
                 *(_run_one(i, item) for i, item in enumerate(items_list)),
                 return_exceptions=False,
             )
-            self._dovetail.events.trace_struct(
+            self.dovetail.events.trace_struct(
                 method="map_blocking",
                 status="Done",
                 function=func_name,
@@ -347,8 +355,8 @@ class Task:
 
         except RuntimeError:
             if inspect.iscoroutinefunction(func_or_coro):
-                func_name = self._dovetail._callable_name(func_or_coro)
-                self._dovetail.events.trace_struct(
+                func_name = self.dovetail._callable_name(func_or_coro)
+                self.dovetail.events.trace_struct(
                     method="run_blocking",
                     status="Start",
                     function=func_name,
@@ -356,11 +364,11 @@ class Task:
                 )
                 try:
                     coro = func_or_coro(*args, **kwargs)
-                    timeout = self._dovetail._default_timeout
+                    timeout = self.dovetail._default_timeout
                     if timeout is not None and timeout > 0:
                         coro = asyncio.wait_for(coro, timeout=timeout)
                     result = asyncio.run(coro)
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="run_blocking",
                         status="Done",
                         function=func_name,
@@ -369,7 +377,7 @@ class Task:
                     )
                     return result
                 except Exception as exc:
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="run_blocking",
                         status="Error",
                         function=func_name,
@@ -378,18 +386,18 @@ class Task:
                     )
                     raise
             if inspect.iscoroutine(func_or_coro):
-                self._dovetail.events.trace_struct(
+                self.dovetail.events.trace_struct(
                     method="run_blocking",
                     status="Start",
                     extra={"Type": "coroutine-object"},
                 )
                 try:
                     coro = func_or_coro
-                    timeout = self._dovetail._default_timeout
+                    timeout = self.dovetail._default_timeout
                     if timeout is not None and timeout > 0:
                         coro = asyncio.wait_for(coro, timeout=timeout)
                     result = asyncio.run(coro)
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="run_blocking",
                         status="Done",
                         elapsed=time.perf_counter() - started_at,
@@ -397,7 +405,7 @@ class Task:
                     )
                     return result
                 except Exception as exc:
-                    self._dovetail.events.trace_struct(
+                    self.dovetail.events.trace_struct(
                         method="run_blocking",
                         status="Error",
                         elapsed=time.perf_counter() - started_at,
@@ -405,8 +413,8 @@ class Task:
                     )
                     raise
 
-            call_name = self._dovetail._callable_name(func_or_coro)
-            self._dovetail.events.trace_struct(
+            call_name = self.dovetail._callable_name(func_or_coro)
+            self.dovetail.events.trace_struct(
                 method="run_blocking",
                 status="Start",
                 function=call_name,
@@ -414,7 +422,7 @@ class Task:
             )
             try:
                 result = func_or_coro(*args, **kwargs)
-                self._dovetail.events.trace_struct(
+                self.dovetail.events.trace_struct(
                     method="run_blocking",
                     status="Done",
                     function=call_name,
@@ -423,7 +431,7 @@ class Task:
                 )
                 return result
             except Exception as exc:
-                self._dovetail.events.trace_struct(
+                self.dovetail.events.trace_struct(
                     method="run_blocking",
                     status="Error",
                     function=call_name,
@@ -442,16 +450,15 @@ class Task:
         self,
         coro_or_callable: Any,
         *args: Any,
-        type: Optional[str] = None,
         **kwargs: Any,
     ) -> asyncio.Task:
         """Schedule coroutine/callable from async code and return an asyncio.Task."""
         loop = asyncio.get_running_loop()
 
         if inspect.iscoroutine(coro_or_callable):
-            timeout = self._dovetail._default_timeout
+            timeout = self.dovetail._default_timeout
             coro = coro_or_callable
-            execution_id = self._dovetail._next_execution_id()
+            execution_id = self.dovetail._next_execution_id()
             function_name = getattr(getattr(coro_or_callable, "cr_code", None), "co_name", None)
             if timeout is not None and timeout > 0:
                 coro = asyncio.wait_for(coro_or_callable, timeout=timeout)
@@ -466,10 +473,10 @@ class Task:
             return task
 
         if inspect.iscoroutinefunction(coro_or_callable):
-            label = f"coroutine-function:{self._dovetail._callable_name(coro_or_callable)}"
-            timeout = self._dovetail._default_timeout
-            execution_id = self._dovetail._next_execution_id()
-            function_name = self._dovetail._callable_name(coro_or_callable)
+            label = f"coroutine-function:{self.dovetail._callable_name(coro_or_callable)}"
+            timeout = self.dovetail._default_timeout
+            execution_id = self.dovetail._next_execution_id()
+            function_name = self.dovetail._callable_name(coro_or_callable)
             coro = coro_or_callable(*args, **kwargs)
             if timeout is not None and timeout > 0:
                 coro = asyncio.wait_for(coro, timeout=timeout)
@@ -485,20 +492,20 @@ class Task:
 
         if callable(coro_or_callable):
             fn = functools.partial(coro_or_callable, *args, **kwargs)
-            trace_id = self._dovetail._next_trace_id()
-            execution_id = self._dovetail._next_execution_id()
-            call_name = self._dovetail._callable_name(coro_or_callable)
+            trace_id = self.dovetail._next_trace_id()
+            execution_id = self.dovetail._next_execution_id()
+            call_name = self.dovetail._callable_name(coro_or_callable)
             retries, retry_backoff = self._resolve_retry_config()
 
             async def _run_in_executor() -> Any:
-                self._dovetail.events.trace_struct(
+                self.dovetail.events.trace_struct(
                     method="schedule",
                     status="Queued",
                     task=trace_id,
                     function=call_name,
                 )
-                self._dovetail.events.inc_stat("queued")
-                self._dovetail._emit_event(
+                self.dovetail.events.inc_stat("queued")
+                self.dovetail._emit_event(
                     "task_queued",
                     {
                         "method": "schedule",
@@ -507,7 +514,7 @@ class Task:
                         "execution_id": execution_id,
                     },
                 )
-                await self._dovetail._acquire_rate_limit(
+                await self.dovetail._acquire_rate_limit(
                     method="schedule", task=trace_id, function=call_name
                 )
 
@@ -515,15 +522,19 @@ class Task:
                     attempt = 0
                     while True:
                         attempt += 1
-                        self._dovetail.events.trace_struct(
+                        self.dovetail.events.trace_struct(
                             method="schedule",
                             status="Start",
                             task=trace_id,
                             function=call_name,
                             extra={"Attempt": attempt},
                         )
-                        self._dovetail.events.inc_stat("started")
-                        self._dovetail._emit_event(
+                        loop.call_soon_threadsafe(
+                            self.dovetail.events.inc_stat,
+                            "started"
+                        )
+                        loop.call_soon_threadsafe(
+                            self.dovetail._emit_event,
                             "task_started",
                             {
                                 "method": "schedule",
@@ -537,7 +548,7 @@ class Task:
                         try:
                             result = fn()
                             elapsed = time.perf_counter() - started_at
-                            self._dovetail.events.trace_struct(
+                            self.dovetail.events.trace_struct(
                                 method="schedule",
                                 status="Done",
                                 task=trace_id,
@@ -545,8 +556,12 @@ class Task:
                                 elapsed=elapsed,
                                 extra={"Attempt": attempt},
                             )
-                            self._dovetail.events.inc_stat("done")
-                            self._dovetail._emit_event(
+                            loop.call_soon_threadsafe(
+                                self.dovetail.events.inc_stat,
+                                "done"
+                            )
+                            loop.call_soon_threadsafe(
+                                self.dovetail._emit_event,
                                 "task_done",
                                 {
                                     "method": "schedule",
@@ -560,7 +575,7 @@ class Task:
                             return result
                         except Exception as exc:
                             elapsed = time.perf_counter() - started_at
-                            self._dovetail.events.trace_struct(
+                            self.dovetail.events.trace_struct(
                                 method="schedule",
                                 status="Error",
                                 task=trace_id,
@@ -569,8 +584,12 @@ class Task:
                                 extra={"Attempt": attempt, "Error": exc},
                             )
                             if attempt > retries:
-                                self._dovetail.events.inc_stat("error")
-                                self._dovetail._emit_event(
+                                loop.call_soon_threadsafe(
+                                    self.dovetail.events.inc_stat,
+                                    "error"
+                                )
+                                loop.call_soon_threadsafe(
+                                    self.dovetail._emit_event,
                                     "task_error",
                                     {
                                         "method": "schedule",
@@ -584,15 +603,19 @@ class Task:
                                 )
                                 raise
                             sleep_for = retry_backoff * (2 ** (attempt - 1)) if retry_backoff > 0 else 0.0
-                            self._dovetail.events.inc_stat("retries")
-                            self._dovetail.events.trace_struct(
+                            loop.call_soon_threadsafe(
+                                self.dovetail.events.inc_stat,
+                                "retries"
+                            )
+                            self.dovetail.events.trace_struct(
                                 method="schedule",
                                 status="Retry",
                                 task=trace_id,
                                 function=call_name,
                                 extra={"Attempt": attempt, "Sleep": f"{sleep_for:.3f}s", "Error": exc},
                             )
-                            self._dovetail._emit_event(
+                            loop.call_soon_threadsafe(
+                                self.dovetail._emit_event,
                                 "task_retry",
                                 {
                                     "method": "schedule",
@@ -607,8 +630,8 @@ class Task:
                             if sleep_for > 0:
                                 time.sleep(sleep_for)
 
-                future = loop.run_in_executor(self._dovetail._threadpool, _wrapped)
-                timeout = self._dovetail._default_timeout
+                future = loop.run_in_executor(self.dovetail._threadpool, _wrapped)
+                timeout = self.dovetail._default_timeout
                 if timeout is None or timeout <= 0:
                     return await future
                 return await asyncio.wait_for(future, timeout=timeout)

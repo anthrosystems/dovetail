@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydovetail"
-version = "1.0.2"
+version = "1.2.0"
 description = "A lightweight helper for bridging sync and async code, built on Asyncio & ThreadPoolExecutor"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -23,6 +23,7 @@ dev = [
 	"build",
 	"twine",
 	"ruff",
+	"objgraph",
 ]
 
 [tool.setuptools.packages.find]
