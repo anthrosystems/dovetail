@@ -35,6 +35,8 @@ def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message:
     """
     if not enabled:
         return
+    
+    prefix = F"DVT-{prefix}" # Add "DVT-" to prefix for clarity.
 
     lg = logger or logging.getLogger(str(prefix or "dovetail"))
     current = threading.current_thread()
@@ -65,6 +67,8 @@ def trace_struct(
     """
     if not enabled:
         return
+    
+    prefix = F"DVT-{prefix}" # Add "DVT-" to prefix for clarity.
 
     lg = logger or logging.getLogger(str(prefix or "dovetail"))
     current = threading.current_thread()
