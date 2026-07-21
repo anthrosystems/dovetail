@@ -620,7 +620,7 @@ def test_shutdown_emits_trace() -> None:
     logger.addHandler(handler)
 
     try:
-        d1 = Dovetail(
+        _d1 = Dovetail(
             trace=True,
             trace_logger=logger,
             shutdown_on_exit=False,

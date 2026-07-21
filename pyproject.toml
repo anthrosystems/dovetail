@@ -29,3 +29,7 @@ dev = [
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["pydovetail*"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test.py" = ["E402"]
+"tests/benchmark.py" = ["E402"]
