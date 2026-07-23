@@ -183,17 +183,37 @@ with Dovetail(max_workers=8) as dvt:
   # Sync caller -> batch map in threadpool (blocks, bounded concurrency)
   results = dvt.task.map_blocking(fetch_data, ["a.json", "b.json"], max_concurrency=4)
 
-  # run an async coroutine from sync code
+  # Run an async coroutine from sync code
   value = dvt.task.run_blocking(fetch_data_async())
+
+  # Or pass a callable:
+  value = dvt.task.run_blocking(fetch_data_async)
 ```
 
 Async (use `async with` in async applications):
 
 ```python
 async with Dovetail() as dvt:
-  # schedule coroutines and await
-  tasks = [dvt.task.schedule(fetch_async(i)) for i in items]
+  # Schedule coroutine objects
+  tasks = [
+      dvt.task.schedule(fetch_async(i))
+      for i in items
+  ]
+
   results = await asyncio.gather(*tasks)
+```
+
+```python
+  # Schedule async functions directly
+  task = dvt.task.schedule(fetch_async, "example")
+
+  result = await task
+
+  # Schedule synchronous callables from async code.
+  # Execution happens in Dovetail's threadpool.
+  task = dvt.task.schedule(fetch_blocking, "example")
+
+  result = await task
 ```
 
 Manual / library patterns (caller-managed ownership):

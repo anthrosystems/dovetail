@@ -76,7 +76,187 @@ with Dovetail(
 - `dvt.task.to_thread_blocking(func, *args, **kwargs)` — synchronous wrapper for `to_thread` when you are not already in an event loop.
 - `dvt.task.map_blocking(func, items, max_concurrency=None, return_exceptions=False)` — run an ordered parallel map over `items` using the threadpool.
 - `dvt.task.run_blocking(func_or_coro, *args, **kwargs)` — run async or sync work from synchronous code. Do not call from inside a running event loop.
-- `dvt.task.schedule(coro_or_callable, *args, **kwargs)` — create and return an `asyncio.Task` from a coroutine object, async function, or sync callable.
+- `dvt.task.schedule(coro_or_callable, *args, **kwargs)` — schedule coroutine objects, async functions, or synchronous callables from async code and return an `asyncio.Task`.
+
+### `dvt.task.schedule(...)`
+
+`schedule()` is the async-side entry point for starting work through Dovetail.
+
+It accepts:
+
+- A coroutine object.
+- An async function.
+- A synchronous callable.
+
+In all cases it returns an `asyncio.Task`, allowing normal asyncio patterns such as:
+
+```python
+task = dvt.task.schedule(worker())
+result = await task
+```
+
+or:
+
+```python
+tasks = [
+    dvt.task.schedule(fetch_item, item)
+    for item in items
+]
+
+results = await asyncio.gather(*tasks)
+```
+
+---
+
+### Scheduling coroutine objects
+
+Existing coroutine objects can be scheduled directly:
+
+```python
+async def fetch_data():
+    return "result"
+
+task = dvt.task.schedule(fetch_data())
+
+result = await task
+```
+
+The coroutine runs directly on the current event loop.
+
+---
+
+### Scheduling coroutine functions
+
+Async functions can be passed without calling them first:
+
+```python
+async def fetch_data(url):
+    return await request(url)
+
+task = dvt.task.schedule(fetch_data, "https://example.com")
+
+result = await task
+```
+
+Arguments and keyword arguments are forwarded when the coroutine is created.
+
+---
+
+### Scheduling synchronous callables
+
+Normal blocking functions can also be scheduled:
+
+```python
+def read_file(path):
+    with open(path) as f:
+        return f.read()
+
+task = dvt.task.schedule(read_file, "data.txt")
+
+result = await task
+```
+
+Synchronous callables run through Dovetail's internal threadpool, preserving:
+
+- retry handling;
+- timeout handling;
+- rate limiting;
+- lifecycle events;
+- tracing;
+- statistics counters.
+
+---
+
+### Timeout behavior
+
+`schedule()` respects the instance-level `timeout` setting:
+
+```python
+dvt = Dovetail(timeout=5)
+
+task = dvt.task.schedule(slow_operation)
+
+await task
+```
+
+When the timeout expires:
+
+- the awaiting task raises `asyncio.TimeoutError`;
+- the execution is marked as failed;
+- an `Event.ERROR` lifecycle event is emitted;
+- the `error` counter is incremented.
+
+For threadpool-backed synchronous functions, the timeout only stops waiting for the result. Python threads cannot be forcibly cancelled, so the underlying function may continue running.
+
+---
+
+### Invalid inputs
+
+`schedule()` rejects values that are not:
+
+- coroutine objects;
+- coroutine functions;
+- callable objects.
+
+Example:
+
+```python
+dvt.task.schedule(123)
+# TypeError
+```
+
+---
+
+### Listener chaining
+
+Because `schedule()` always returns an `asyncio.Task`, it can safely be called inside lifecycle callbacks:
+
+```python
+def first_step():
+    return "done"
+
+def second_step():
+    return "follow-up"
+
+def on_first_complete(payload):
+    dvt.task.schedule(second_step)
+
+dvt.events.on(
+    Event.DONE,
+    on_first_complete,
+    function_target=first_step,
+)
+
+await dvt.task.schedule(first_step)
+```
+
+Callbacks receive the event payload, and scheduling follow-up work does not block the callback.
+
+> **Important:** pass a callback function to `dvt.events.on()`, not the result of calling `schedule()`.
+
+Incorrect:
+
+```python
+dvt.events.on(
+    Event.DONE,
+    dvt.task.schedule(second_step),
+)
+```
+
+Why it fails:
+
+- `dvt.task.schedule(second_step)` immediately creates an `asyncio.Task`;
+- `asyncio.Task` is not a callable callback;
+- listeners require a function that accepts the event payload.
+
+Correct:
+
+```python
+def callback(payload):
+    dvt.task.schedule(second_step)
+
+dvt.events.on(Event.DONE, callback)
+```
 
 > **NOTE - Known limitations with `dvt.task.run_blocking(func_or_coro, *args, **kwargs)`:**
 >
@@ -104,23 +284,49 @@ with Dovetail(
 
 ### Events
 
-- `dvt.events.on_queued(...)` — fires when a task is queued.
-- `dvt.events.on_start(...)` — fires when a task starts executing.
-- `dvt.events.on_rate_limited(...)` — fires when a task start is delayed by the token-bucket rate limiter.
-- `dvt.events.on_retry(...)` — fires on each retry attempt.
-- `dvt.events.on_error(...)` — fires when a task raises an exception.
-- `dvt.events.on_cancel(...)` — fires when a task is cancelled.
-- `dvt.events.on_end(...)` — fires when a task resolves (including after retries).
+- `dvt.events.on(Event.QUEUED, ...)` — fires when a task is queued.
+- `dvt.events.on(Event.STARTED, ...)` — fires when a task starts executing.
+- `dvt.events.on(Event.RATE_LIMITED, ...)` — fires when a task start is delayed by the token-bucket rate limiter.
+- `dvt.events.on(Event.RETRY, ...)` — fires on each retry attempt.
+- `dvt.events.on(Event.ERROR, ...)` — fires when a task raises an exception.
+- `dvt.events.on(Event.CANCELLED, ...)` — fires when a task is cancelled.
+- `dvt.events.on(Event.DONE, ...)` — fires when a task resolves (including after retries).
+- `dvt.events.off(...)` — unregister a listener by subscription id or by passing the decorated listener function directly.
+- `dvt.events.clear()` — remove all registered listeners.
 - `dvt.events.stats()` — returns cumulative counters: `queued`, `started`, `done`, `error`, `retries`, `throttled`.
 - `dvt.events.trace(message)` / `dvt.events.trace_struct(...)` — emit your own trace lines through the same tracing pipeline Dovetail uses internally. See [Tracing & Custom Instrumentation](#tracing--custom-instrumentation).
 - `dvt.events.inc_stat(key, count=1)` — increment a custom entry in the same counters dict returned by `stats()`. See [Tracing & Custom Instrumentation](#tracing--custom-instrumentation).
 
-> All `dvt.events.on_*` methods accept these optional scope parameters:
+`dvt.events.on()` can be used either directly:
+
+```python
+subscription = dvt.events.on(Event.DONE, callback)
+```
+
+or as a decorator:
+
+```python
+@dvt.events.on(Event.DONE)
+def callback(event):
+    print("Task completed!")
+```
+
+Decorated listeners can later be removed simply by passing the function:
+
+```python
+dvt.events.off(callback)
+```
+
+or, if you registered directly, by using the returned subscription id:
+
+```python
+dvt.events.off(subscription)
+```
+
+> `dvt.events.on()` accepts these optional scope parameters:
 > - `function_target` — only receive events for a specific callable.
-> - `execution_target` — only receive events for a specific execution id (available
->   as `id` in the event payload).
-> - `allow_reentry=False` — prevents a listener from triggering itself recursively.
->   Set to `True` to allow reentry, bounded by `max_chain_depth`.
+> - `execution_target` — only receive events for a specific execution id (available as `execution_id` in the event payload).
+> - `allow_reentry=False` — prevents a listener from triggering itself recursively. Set to `True` to allow reentry, bounded by `max_chain_depth`.
 > - `max_chain_depth=5` — maximum active callback depth when reentry is enabled.
 
 
@@ -185,7 +391,7 @@ Observability is exposed via lifecycle events, cumulative counters, and opt-in s
   - **done:** task completed successfully (after retries, if any).
   - **error:** task failed permanently (including timeouts after retries are exhausted).
   - **retries:** retry attempts performed (each retry increments this counter).
-  - **throttled:** increments when a rate limiter delays a start (i.e. non-zero wait). Pairs with `dvt.events.on_rate_limited(...)` if you also want to react to individual throttling events rather than just read the cumulative count.
+  - **throttled:** increments when a rate limiter delays a start (i.e. non-zero wait). Pairs with `dvt.events.on(Event.RATE_LIMITED, ...)` if you also want to react to individual throttling events rather than just read the cumulative count.
 >
   Example — checking counters after a batch job:
 
@@ -200,7 +406,7 @@ Observability is exposed via lifecycle events, cumulative counters, and opt-in s
 >
 - **Event payloads:** lifecycle events carry a payload dict with common fields: `method`, `task`, `function`, `execution_id`. Event-specific fields may include `attempt`, `elapsed`, `error`, `sleep`, and `waited`.
 >
-- **Rate limiting:** Dovetail uses a token-bucket strategy to control task-start throughput. When `rate_limit_per_sec` and optional `rate_limit_burst` are set, `acquire_async()` may return a non-zero `waited` value; such delays increment `throttled` and emit a `task_rate_limited` event with `waited` in the payload — subscribe to it directly with `dvt.events.on_rate_limited(...)`.
+- **Rate limiting:** Dovetail uses a token-bucket strategy to control task-start throughput. When `rate_limit_per_sec` and optional `rate_limit_burst` are set, `acquire_async()` may return a non-zero `waited` value; such delays increment `throttled` and emit a `task_rate_limited` event with `waited` in the payload — subscribe to it directly with `dvt.events.on(Event.RATE_LIMITED, ...)`.
 >
 - **Retries & timeouts:** Timeouts apply to waiting for execution, not forcibly cancelling execution. For threadpool tasks, a timeout raises an error to the caller while the underlying function may continue running in the background. Avoid using timeouts with non-idempotent operations unless you have your own cancellation or deduplication strategy.
 >
@@ -209,7 +415,7 @@ Observability is exposed via lifecycle events, cumulative counters, and opt-in s
 - **Practical patterns / runbook:**
   - For low overhead, emit structured logs (JSON) with `execution_id` / `task` and query them in your logging backend.
   - For detailed forensics, record events to a secondary store using an async/batched writer (sampling or "record-on-error" reduces runtime cost).
-  - To debug an incident: (1) check `dvt.events.stats()` for anomalies; (2) enable tracing for one instance or a time window; (3) attach `on_error` to capture payloads for failed executions.
+  - To debug an incident: (1) check `dvt.events.stats()` for anomalies; (2) enable tracing for one instance or a time window; (3) attach `on(Event.ERROR, ...)` to capture payloads for failed executions.
 
 For deeper examples and usage patterns see the **[Event Listeners](#event-listeners)**, **[Retries & Rate Limiting](#retries--rate-limiting)**, and **[Tracing & Custom Instrumentation](#tracing--custom-instrumentation)** sections below.
 
@@ -221,13 +427,13 @@ Event listeners are the primary way to observe lifecycle events and trigger foll
 
 ### Lifecycle methods
 
-- `dvt.events.on_queued(...)` -> `task_queued`
-- `dvt.events.on_start(...)` -> `task_started`
-- `dvt.events.on_end(...)` -> `task_done`
-- `dvt.events.on_error(...)` -> `task_error`
-- `dvt.events.on_retry(...)` -> `task_retry`
-- `dvt.events.on_cancel(...)` -> `task_cancelled`
-- `dvt.events.on_rate_limited(...)` -> `task_rate_limited`
+- `dvt.events.on(Event.QUEUED, ...)` -> `task_queued`
+- `dvt.events.on(Event.STARTED, ...)` -> `task_started`
+- `dvt.events.on(Event.RETRY, ...)` -> `task_retry`
+- `dvt.events.on(Event.RATE_LIMITED, ...)` -> `task_rate_limited`
+- `dvt.events.on(Event.ERROR, ...)` -> `task_error`
+- `dvt.events.on(Event.CANCELLED, ...)` -> `task_cancelled`
+- `dvt.events.on(Event.DONE, ...)` -> `task_done`
 
 Each method registers a subscription and returns a subscription id.
 
@@ -276,12 +482,12 @@ def on_a_end(payload):
 
 # Global listener
 # Useful for telemetry/logging across all functions.
-dvt.events.on_end(on_any_done)
+dvt.events.on(Event.DONE, on_any_done)
 
 # Function-scoped listeners
 # Most common orchestration style.
-dvt.events.on_start(on_a_start, function_target=step_a)
-dvt.events.on_end(on_a_end, function_target=step_a)
+dvt.events.on(Event.STARTED, on_a_start, function_target=step_a)
+dvt.events.on(Event.DONE, on_a_end, function_target=step_a)
 
 async def main():
   task = dvt.task.schedule(step_a)
@@ -291,7 +497,7 @@ async def main():
   # Optional instance-scoped listener (advanced/rare)
   if captured_instance_ids:
     one_instance_id = captured_instance_ids[0]
-    dvt.events.on_end(
+    dvt.events.on(Event.DONE, 
       lambda p: print("INSTANCE done:", p.get("function"), p.get("execution_id")),
       execution_target=one_instance_id,
     )
@@ -301,7 +507,7 @@ asyncio.run(main())
 
 ### Reacting to queueing, retries, and cancellation
 
-`on_start` and `on_end` are the most common listeners, but the same pattern applies to every lifecycle event. A few worked examples:
+`on(Event.STARTED, ...)` and `on(Event.DONE, ...)` are the most common listeners, but the same pattern applies to every lifecycle event. A few worked examples:
 
 ```python
 def unreliable_upload():
@@ -314,39 +520,39 @@ def on_upload_retry(payload):
     print(f"Retrying {payload['function']} (attempt {payload['attempt']}), "
           f"sleeping {payload['sleep']:.2f}s after: {payload['error']}")
 
-dvt.events.on_retry(on_upload_retry, function_target=unreliable_upload)
+dvt.events.on(Event.RETRY, on_upload_retry, function_target=unreliable_upload)
 
 # React to a task being queued — useful for tracking queue depth or
 # backpressure before anything has actually started.
 def on_any_queued(payload):
     queue_depth_metric.increment()
 
-dvt.events.on_queued(on_any_queued)
+dvt.events.on(Event.QUEUED, on_any_queued)
 
 # React to cancellation — useful for cleanup when a scheduled task is
 # cancelled before it completes (e.g. on shutdown or timeout elsewhere).
 def on_cancelled(payload):
     print(f"Task {payload['execution_id']} was cancelled before completion")
 
-dvt.events.on_cancel(on_cancelled)
+dvt.events.on(Event.CANCELLED, on_cancelled)
 
 # React to rate-limit throttling — useful for alerting when you're
 # consistently hitting your own configured rate limit.
 def on_throttled(payload):
     print(f"Throttled {payload['function']}, waited {payload['waited']:.2f}s")
 
-dvt.events.on_rate_limited(on_throttled)
+dvt.events.on(Event.RATE_LIMITED, on_throttled)
 ```
 
 > ### Common pitfall
 > ```python
 > # Incorrect:
-> dvt.events.on_end(dvt.task.schedule(step_b), function_target=step_a)
+> dvt.events.on(Event.DONE, dvt.task.schedule(step_b), function_target=step_a)
 > ```
 > 
 > Why it fails:
 > 
-> - `on_end(...)` expects a callback function as first argument.
+> - `on(Event.DONE, ...)` expects a callback function as first argument.
 > - `dvt.task.schedule(step_b)` executes immediately and returns an `asyncio.Task`.
 > - `asyncio.Task` is not callable, so listener registration fails.
 > 
@@ -356,7 +562,7 @@ dvt.events.on_rate_limited(on_throttled)
 > def on_a_end(payload):
 >   dvt.task.schedule(step_b)
 > 
-> dvt.events.on_end(on_a_end, function_target=step_a)
+> dvt.events.on(Event.DONE, on_a_end, function_target=step_a)
 > ```
 
 ---
@@ -422,7 +628,7 @@ Behavior:
 
 - Starts may be delayed when token budget is exhausted.
 - Delays increment `throttled` counter.
-- Rate-limited starts emit `task_rate_limited` with `waited` duration — subscribe with `dvt.events.on_rate_limited(...)`.
+- Rate-limited starts emit `task_rate_limited` with `waited` duration — subscribe with `dvt.events.on(Event.RATE_LIMITED, ...)`.
 
 ### Tuning suggestions
 

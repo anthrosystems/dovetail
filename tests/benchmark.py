@@ -102,7 +102,7 @@ from typing import List
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)) # Ensure local package is benchmarked, not PyPI release
 
-from pydovetail import Dovetail
+from pydovetail import Dovetail, Event
 
 
 # Module-level logger used when enabling Dovetail trace output from main()
@@ -142,7 +142,7 @@ async def async_io_job(task_id: int, duration: float) -> int:
 
 def attach_observers(dvt: Dovetail, mode_name: str) -> None:
     """
-    Attach all six lifecycle listeners to a Dovetail instance.
+    Attach lifecycle listeners to a Dovetail instance.
     Each prints a one-line entry so you can watch events fire in real time.
     Only called when --observe is set; has no effect on timing otherwise.
 
@@ -150,23 +150,48 @@ def attach_observers(dvt: Dovetail, mode_name: str) -> None:
     """
     tag = f"  [{mode_name}]"
 
-    dvt.events.on_queued(
-        lambda p: print(f"{tag} queued    {p.get('execution_id', '?')}  fn={p.get('function', '?')}")
+    dvt.events.on(
+        Event.QUEUED,
+        lambda p: print(
+            f"{tag} queued    {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
+        ),
     )
-    dvt.events.on_start(
-        lambda p: print(f"{tag} started   {p.get('execution_id', '?')}  fn={p.get('function', '?')}")
+
+    dvt.events.on(
+        Event.STARTED,
+        lambda p: print(
+            f"{tag} started   {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
+        ),
     )
-    dvt.events.on_end(
-        lambda p: print(f"{tag} done      {p.get('execution_id', '?')}  fn={p.get('function', '?')}")
+
+    dvt.events.on(
+        Event.DONE,
+        lambda p: print(
+            f"{tag} done      {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
+        ),
     )
-    dvt.events.on_error(
-        lambda p: print(f"{tag} ERROR     {p.get('execution_id', '?')}  fn={p.get('function', '?')}  exc={p.get('exception', '?')}")
+
+    dvt.events.on(
+        Event.ERROR,
+        lambda p: print(
+            f"{tag} ERROR     {p.get('execution_id', '?')}  "
+            f"fn={p.get('function', '?')}  exc={p.get('exception', '?')}"
+        ),
     )
-    dvt.events.on_retry(
-        lambda p: print(f"{tag} retry     {p.get('execution_id', '?')}  fn={p.get('function', '?')}  attempt={p.get('attempt', '?')}")
+
+    dvt.events.on(
+        Event.RETRY,
+        lambda p: print(
+            f"{tag} retry     {p.get('execution_id', '?')}  "
+            f"fn={p.get('function', '?')}  attempt={p.get('attempt', '?')}"
+        ),
     )
-    dvt.events.on_cancel(
-        lambda p: print(f"{tag} cancelled {p.get('execution_id', '?')}  fn={p.get('function', '?')}")
+
+    dvt.events.on(
+        Event.CANCELLED,
+        lambda p: print(
+            f"{tag} cancelled {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
+        ),
     )
 
 
