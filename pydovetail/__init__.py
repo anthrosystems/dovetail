@@ -7,6 +7,7 @@ an executor helper so they control lifetimes and configuration.
 """
 
 from .dovetail import Dovetail
+from ._events import Event
 from ._register import (
 	register,
 	unregister,
@@ -16,7 +17,8 @@ from ._register import (
 )
 
 __all__ = [
-	"Dovetail",
+    "Dovetail",
+	"Event",
 	"register",
 	"unregister",
 	"list_active",

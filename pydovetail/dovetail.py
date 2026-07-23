@@ -1,9 +1,9 @@
 """Sync / Async wrapper for Python, built on Asyncio + ThreadPoolExecutor.
 
 Quick use:
-- from async code: await d.task.to_thread(fn, *args)
-- from async code: task = d.task.schedule(coro_or_callable, ...)
-- from sync code: result = d.task.run_blocking(coro_or_callable, ...)
+- from async code: await dvt.task.to_thread(fn, *args)
+- from async code: task = dvt.task.schedule(coro_or_callable, ...)
+- from sync code: result = dvt.task.run_blocking(coro_or_callable, ...)
 
 Optional constructor settings add rate limiting, default timeout, retries,
 events, and cumulative status counters.
@@ -17,7 +17,7 @@ import weakref
 
 from typing import Any, Callable, Optional, Dict
 
-from ._events import Events
+from ._events import Event, Events
 from ._task import Task
 
 
@@ -203,7 +203,7 @@ class Dovetail:
                 function=function,
                 elapsed=waited,
             )
-            self._emit_event("task_rate_limited", payload)
+            self._emit_event(Event.RATE_LIMITED, payload)
 
     @staticmethod
     def _callable_name(func: Any) -> str:

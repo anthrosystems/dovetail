@@ -43,11 +43,12 @@ Coverage:
     - registry does not retain dead Dovetail objects
 
   Events
-    - on_queued / on_start / on_end / on_error / on_retry / on_cancel /
-      on_rate_limited, each exercised directly
+    - on(Event.QUEUED) / on(Event.STARTED) / on(Event.DONE) / on(Event.ERROR) /
+      on(Event.RETRY) / on(Event.CANCELLED) / on(Event.RATE_LIMITED), each
+      exercised directly
     - event ordering across a single call (queued -> started -> done)
-    - on_start fires once per retry attempt with correct attempt numbers
-    - retry exhaustion: on_retry count + final on_error count
+    - on(Event.STARTED) fires once per retry attempt with correct attempt numbers
+    - retry exhaustion: on(Event.RETRY) count + final on(Event.ERROR) count
     - global (unscoped) listeners
     - function_target scoping
     - execution_target scoping
@@ -56,7 +57,7 @@ Coverage:
     - max_chain_depth < 1 raises ValueError
     - reentry disallowed (default) blocks a callback calling itself
     - reentry allowed, bounded by max_chain_depth
-    - chained scheduling from within an on_end callback (docs pattern)
+    - chained scheduling from within an on(Event.DONE) callback (docs pattern)
     - documented pitfall: passing a Task (not a function) as a callback
       raises TypeError
 
@@ -75,7 +76,10 @@ import logging
 import sys
 import threading
 import time
+import inspect
 import traceback
+import gc
+import weakref
 
 from pathlib import Path
 from typing import Any, Callable
@@ -85,6 +89,7 @@ sys.path.insert(0, str(ROOT)) # Ensure local package is tested, not PyPI release
 
 from pydovetail import (
     Dovetail,
+    Event,
     register,
     unregister,
     list_active,
@@ -448,10 +453,47 @@ def test_registry_shutdown_hook_executes() -> None:
         set_app_shutdown_hook(None)
 
 
-def test_registry_gc_cleanup() -> None:
-    import gc
-    import weakref
+def debug_dovetail_refs():
+    """
+    Finds and prints all objects holding a strong reference to the target instance.
+    """
+    print("\n--- GC Referrers Debug ---")
+    
+    dvt = Dovetail(shutdown_on_exit=False)
+    
+    # Force a garbage collection pass to clear any unreferenced cycles
+    gc.collect() 
+    
+    # Retrieve everything that refers to our instance
+    referrers = gc.get_referrers(dvt)
+    
+    for ref in referrers:
+        # Filter out the current frame to reduce noise
+        if inspect.isframe(ref) and ref.f_code.co_name == 'debug_dovetail_refs':
+            continue
+            
+        print(f"Reference Type: {type(ref)}")
+        
+        # If it's a dictionary, it might be a module dict or an object's __dict__
+        if isinstance(ref, dict):
+            # Print a few keys to give context without flooding the terminal
+            safe_keys = list(ref.keys())[:10]
+            print(f"Dict keys (up to 10): {safe_keys}")
+            
+        # If it's a frame, this is likely an exception traceback or closure
+        elif inspect.isframe(ref):
+            print(f"Frame Location: {ref.f_code.co_filename}:{ref.f_lineno}")
+            print(f"Frame Function: {ref.f_code.co_name}")
+            print(f"Frame Locals: {list(ref.f_locals.keys())}")
+            
+        # For classes, bound methods, or other objects
+        else:
+            print(f"Object Representation: {ref}")
+            
+        print("-" * 40)
 
+
+def test_registry_gc_cleanup() -> None:
     def create_ref():
         dvt = Dovetail(shutdown_on_exit=False)
         return weakref.ref(dvt)
@@ -487,7 +529,8 @@ def test_events_function_and_instance_target_raises() -> None:
             pass
 
         try:
-            dvt.events.on_start(
+            dvt.events.on(
+                Event.STARTED,
                 lambda payload: None,
                 function_target=dummy,
                 execution_target="exec-1",
@@ -503,7 +546,7 @@ def test_events_function_and_instance_target_raises() -> None:
 def test_events_invalid_callback_raises_type_error() -> None:
     with Dovetail(shutdown_on_exit=False) as dvt:
         try:
-            dvt.events.on_start("not callable")  # type: ignore[arg-type]
+            dvt.events.on(Event.STARTED, "not callable")  # type: ignore[arg-type]
         except TypeError:
             pass
         else:
@@ -513,7 +556,7 @@ def test_events_invalid_callback_raises_type_error() -> None:
 def test_events_max_chain_depth_invalid_raises() -> None:
     with Dovetail(shutdown_on_exit=False) as dvt:
         try:
-            dvt.events.on_start(lambda payload: None, max_chain_depth=0)
+            dvt.events.on(Event.STARTED, lambda payload: None, max_chain_depth=0)
         except ValueError:
             pass
         else:
@@ -527,10 +570,10 @@ def test_events_reentry_disallowed_by_default() -> None:
         def cb(payload: dict) -> None:
             call_count["n"] += 1
             if call_count["n"] < 3:
-                dvt.events.emit("task_queued", {"function": None})
+                dvt.events.emit(Event.QUEUED, {"function": None})
 
-        dvt.events.on_queued(cb, allow_reentry=False)
-        dvt.events.emit("task_queued", {"function": None})
+        dvt.events.on(Event.QUEUED, cb, allow_reentry=False)
+        dvt.events.emit(Event.QUEUED, {"function": None})
 
         check_equal(
             call_count["n"],
@@ -546,16 +589,95 @@ def test_events_reentry_allowed_bounded_by_max_chain_depth() -> None:
         def cb(payload: dict) -> None:
             call_count["n"] += 1
             if call_count["n"] < 10:
-                dvt.events.emit("task_started", {"function": None})
+                dvt.events.emit(Event.STARTED, {"function": None})
 
-        dvt.events.on_start(cb, allow_reentry=True, max_chain_depth=3)
-        dvt.events.emit("task_started", {"function": None})
+        dvt.events.on(Event.STARTED, cb, allow_reentry=True, max_chain_depth=3)
+        dvt.events.emit(Event.STARTED, {"function": None})
 
         check_equal(
             call_count["n"],
             3,
             "reentry allowed: nested calls should stop once max_chain_depth is reached",
         )
+
+
+def test_events_off_removes_subscription():
+    dvt = Dovetail()
+    
+    calls = []
+
+    def listener(payload):
+        calls.append(payload)
+
+    subscription_id = dvt.events.on(Event.DONE, listener)
+
+    assert dvt.events.off(subscription_id) is True
+
+    dvt._emit_event(
+        Event.DONE,
+        {"function": "test_func", "execution_id": "exec-1"},
+    )
+
+    assert calls == []
+
+
+def test_events_off_unknown_subscription_returns_false():
+    dvt = Dovetail()
+    assert dvt.events.off("sub-does-not-exist") is False
+
+
+def test_events_off_accepts_decorated_listener():
+    dvt = Dovetail()
+    
+    calls = []
+
+    @dvt.events.on(Event.DONE)
+    def listener(payload):
+        calls.append(payload)
+
+    assert dvt.events.off(listener) is True
+
+    dvt._emit_event(
+        Event.DONE,
+        {"function": "test_func", "execution_id": "exec-1"},
+    )
+
+    assert calls == []
+
+
+def test_events_clear_removes_all_listeners():
+    dvt = Dovetail()
+    
+    calls = []
+
+    def listener_one(payload):
+        calls.append(("one", payload))
+
+    def listener_two(payload):
+        calls.append(("two", payload))
+
+    dvt.events.on(Event.DONE, listener_one)
+    dvt.events.on(Event.ERROR, listener_two)
+
+    removed = dvt.events.clear()
+
+    assert removed == 2
+
+    dvt._emit_event(
+        Event.DONE,
+        {"function": "test_func", "execution_id": "exec-1"},
+    )
+    dvt._emit_event(
+        Event.ERROR,
+        {"function": "test_func", "execution_id": "exec-2"},
+    )
+
+    assert calls == []
+
+
+def test_events_clear_returns_zero_when_empty():
+    dvt = Dovetail()
+    assert dvt.events.clear() == 0
 
 
 def test_tracing_and_instrumentation() -> None:
@@ -748,9 +870,9 @@ async def test_event_ordering_queued_started_done() -> None:
         def f() -> str:
             return "ok"
 
-        dvt.events.on_queued(lambda p: order.append("queued"), function_target=f)
-        dvt.events.on_start(lambda p: order.append("started"), function_target=f)
-        dvt.events.on_end(lambda p: order.append("done"), function_target=f)
+        dvt.events.on(Event.QUEUED, lambda p: order.append("queued"), function_target=f)
+        dvt.events.on(Event.STARTED, lambda p: order.append("started"), function_target=f)
+        dvt.events.on(Event.DONE, lambda p: order.append("done"), function_target=f)
 
         result = await dvt.task.to_thread(f)
 
@@ -765,7 +887,7 @@ async def test_event_ordering_queued_started_done() -> None:
 async def test_global_listener_fires_for_every_function() -> None:
     async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
         hits: list[Any] = []
-        dvt.events.on_end(lambda p: hits.append(p.get("function")))
+        dvt.events.on(Event.DONE, lambda p: hits.append(p.get("function")))
 
         def f1() -> int:
             return 1
@@ -789,7 +911,8 @@ async def test_function_target_scoping() -> None:
         def func_b() -> str:
             return "b"
 
-        dvt.events.on_end(
+        dvt.events.on(
+            Event.DONE,
             lambda p: hits_a.append(p.get("function")),
             function_target=func_a,
         )
@@ -810,7 +933,8 @@ async def test_instance_target_scoping() -> None:
             return "x"
 
         ids: list[Any] = []
-        dvt.events.on_start(
+        dvt.events.on(
+            Event.STARTED,
             lambda p: ids.append(p.get("execution_id")),
             function_target=sample,
         )
@@ -824,7 +948,8 @@ async def test_instance_target_scoping() -> None:
         check(ids[0] != ids[1], "execution ids should be unique per call")
 
         hits_first: list[Any] = []
-        dvt.events.on_end(
+        dvt.events.on(
+            Event.DONE,
             lambda p: hits_first.append(p.get("execution_id")),
             execution_target=first_id,
         )
@@ -847,7 +972,7 @@ async def test_event_callback_exception_does_not_break_task() -> None:
             callback_errors.append("called")
             raise RuntimeError("listener exploded")
 
-        dvt.events.on_end(bad_callback)
+        dvt.events.on(Event.DONE, bad_callback)
 
         result = await dvt.task.to_thread(lambda: 42)
 
@@ -872,11 +997,13 @@ async def test_retry_exhaustion_and_error_event() -> None:
         def always_fails() -> None:
             raise RuntimeError("boom")
 
-        dvt.events.on_retry(
+        dvt.events.on(
+            Event.RETRY,
             lambda p: retry_hits.append(p.get("attempt")),
             function_target=always_fails,
         )
-        dvt.events.on_error(
+        dvt.events.on(
+            Event.ERROR,
             lambda p: error_hits.append(p.get("attempt")),
             function_target=always_fails,
         )
@@ -909,7 +1036,8 @@ async def test_started_fires_once_per_retry_attempt() -> None:
                 raise RuntimeError("fail")
             return "ok"
 
-        dvt.events.on_start(
+        dvt.events.on(
+            Event.STARTED,
             lambda p: attempts_seen.append(p.get("attempt")),
             function_target=flaky,
         )
@@ -920,14 +1048,14 @@ async def test_started_fires_once_per_retry_attempt() -> None:
         check_equal(
             attempts_seen,
             [1, 2, 3],
-            "on_start should fire once per attempt with the correct attempt number",
+            "on(Event.STARTED) should fire once per attempt with the correct attempt number",
         )
 
 
 async def test_cancellation_event() -> None:
     async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
         cancel_hits: list[Any] = []
-        dvt.events.on_cancel(lambda p: cancel_hits.append(p.get("execution_id")))
+        dvt.events.on(Event.CANCELLED, lambda p: cancel_hits.append(p.get("execution_id")))
 
         task = dvt.task.schedule(asyncio.sleep(0.2))
         await asyncio.sleep(0.01)
@@ -935,7 +1063,7 @@ async def test_cancellation_event() -> None:
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.sleep(0.01)
 
-        check_equal(len(cancel_hits), 1, "on_cancel should fire exactly once")
+        check_equal(len(cancel_hits), 1, "on(Event.CANCELLED) should fire exactly once")
 
 
 async def test_rate_limiting_with_event_and_stat() -> None:
@@ -945,7 +1073,7 @@ async def test_rate_limiting_with_event_and_stat() -> None:
         shutdown_on_exit=False,
     ) as dvt:
         throttle_hits: list[Any] = []
-        dvt.events.on_rate_limited(lambda p: throttle_hits.append(p.get("waited")))
+        dvt.events.on(Event.RATE_LIMITED, lambda p: throttle_hits.append(p.get("waited")))
 
         results = await asyncio.gather(
             dvt.task.schedule(lambda: "first"),
@@ -963,7 +1091,7 @@ async def test_rate_limiting_with_event_and_stat() -> None:
         )
         check(
             len(throttle_hits) >= 1,
-            "on_rate_limited listener should fire at least once",
+            "on(Event.RATE_LIMITED) listener should fire at least once",
         )
 
 
@@ -987,8 +1115,8 @@ async def test_chained_scheduling_via_on_end() -> None:
             chain_hits.append("b_done")
             b_done.set()
 
-        dvt.events.on_end(on_a_end, function_target=step_a)
-        dvt.events.on_end(on_b_end, function_target=step_b)
+        dvt.events.on(Event.DONE, on_a_end, function_target=step_a)
+        dvt.events.on(Event.DONE, on_b_end, function_target=step_b)
 
         await dvt.task.schedule(step_a)
         await asyncio.wait_for(b_done.wait(), timeout=1.0)
@@ -1002,7 +1130,7 @@ async def test_event_listener_requires_callable_callback() -> None:
         task = dvt.task.schedule(lambda: "b")
 
         try:
-            dvt.events.on_end(task)
+            dvt.events.on(Event.DONE, task)
         except TypeError:
             pass
         else:
@@ -1042,12 +1170,18 @@ SYNC_TESTS: list[tuple[str, Callable[[], Any]]] = [
     ("registry: shutdown_all", test_registry_shutdown_all),
     ("registry: test that shutdown() removes instance", test_registry_shutdown_removes_instance),
     ("registry: set and test app shutdown hook", test_registry_shutdown_hook_executes),
+    ("registry: debug_dovetail_refs", debug_dovetail_refs),
     ("registry: gc cleanup", test_registry_gc_cleanup),
     ("events: function_target + execution_target raises ValueError", test_events_function_and_instance_target_raises),
     ("events: non-callable callback raises TypeError", test_events_invalid_callback_raises_type_error),
     ("events: max_chain_depth < 1 raises ValueError", test_events_max_chain_depth_invalid_raises),
     ("events: reentry disallowed by default", test_events_reentry_disallowed_by_default),
     ("events: reentry allowed, bounded by max_chain_depth", test_events_reentry_allowed_bounded_by_max_chain_depth),
+    ("events: off removes subscription", test_events_off_removes_subscription),
+    ("events: off unknown subscription returns false", test_events_off_unknown_subscription_returns_false),
+    ("events: off accepts decorated listener", test_events_off_accepts_decorated_listener),
+    ("events: clear removes all listeners", test_events_clear_removes_all_listeners),
+    ("events: clear returns zero when empty", test_events_clear_returns_zero_when_empty),
     ("tracing & custom instrumentation", test_tracing_and_instrumentation),
     ("tracing & custom instrumentation: shutdown trace emit", test_shutdown_emits_trace),
 ]
@@ -1068,10 +1202,10 @@ ASYNC_TESTS: list[tuple[str, Callable[[], Any]]] = [
     ("execution_target scoping", test_instance_target_scoping),
     ("events: test callback exception does not break task", test_event_callback_exception_does_not_break_task),
     ("retry exhaustion: retry count + final error event", test_retry_exhaustion_and_error_event),
-    ("on_start fires once per retry attempt", test_started_fires_once_per_retry_attempt),
+    ("on(Event.STARTED) fires once per retry attempt", test_started_fires_once_per_retry_attempt),
     ("cancellation event", test_cancellation_event),
     ("rate limiting: event + throttled stat together", test_rate_limiting_with_event_and_stat),
-    ("chained scheduling via on_end", test_chained_scheduling_via_on_end),
+    ("chained scheduling via on(Event.DONE)", test_chained_scheduling_via_on_end),
     ("task as callback raises TypeError", test_event_listener_requires_callable_callback),
 ]
 

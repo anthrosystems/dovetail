@@ -14,10 +14,22 @@ import threading
 import weakref
 
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+from enum import StrEnum
 
 if TYPE_CHECKING:
     from .dovetail import Dovetail
 
+class Event(StrEnum):
+    QUEUED = "queued"
+    STARTED = "started"
+    RETRY = "retry"
+    RATE_LIMITED = "rate_limited"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    DONE = "done"
+
+    def __str__(self) -> str:
+        return self.value
 
 class Events:
     def __init__(
@@ -45,6 +57,10 @@ class Events:
         # metadata is stored separately to allow efficient matching logic.
         self._listeners: Dict[str, Dict[str, Callable[[Dict[str, Any]], None]]] = {}
         self._subscriptions: Dict[str, Dict[str, Any]] = {}
+        
+        # Track decorated listener functions without mutating user functions.
+        # Entries disappear automatically when functions are garbage collected.
+        self._decorated_functions: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
         # Tracing configuration: feature flag and optional logger/prefix.
         # These are small and cheap to check from hot paths; the actual heavy
@@ -134,9 +150,17 @@ class Events:
         with self._stats_lock:
             return dict(self._stats)
 
+    @staticmethod
+    def _event_name(event: Event | str) -> str:
+        """Convert an Event enum or string into a canonical event name."""
+        if isinstance(event, Event):
+            return event.value
+
+        return str(event).strip()
+    
     def _register_listener(
         self,
-        event: str,
+        event: Event | str,
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
@@ -154,11 +178,14 @@ class Events:
         """
         if not callable(callback):
             raise TypeError("callback must be callable")
-        event_name = str(event or "").strip()
+        event_name = self._event_name(event)
+        
         if not event_name:
             raise ValueError("event cannot be empty")
+        
         if function_target is not None and execution_target is not None:
             raise ValueError("function_target and execution_target are mutually exclusive")
+        
         if int(max_chain_depth) < 1:
             raise ValueError("max_chain_depth must be >= 1")
 
@@ -181,174 +208,139 @@ class Events:
                 "active_depth": 0,
             }
         return sub_id
-
-    def on_queued(
-        self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for task queueing events.
-
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
-        """
-        return self._register_listener(
-            "task_queued",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
-
-    def on_start(
-        self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for task start events.
-
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
-        """
-        return self._register_listener(
-            "task_started",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
     
-    def on_rate_limited(
+    def on(
         self,
-        callback: Callable[[Dict[str, Any]], None],
+        event: Event,
+        callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         *,
         function_target: Optional[Any] = None,
         execution_target: Optional[Any] = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for rate-limit throttling events.
+    ) -> str | Callable[[Dict[str, Any]], None]:
+        """Register an event listener.
 
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
+        Can be used directly:
+
+            dvt.events.on(Event.DONE, callback)
+
+        Or as a decorator:
+
+            @dvt.events.on(Event.DONE)
+            def callback(event):
+                ...
+
+        Returns:
+            Subscription id when called directly.
+            The original function when used as a decorator.
         """
-        return self._register_listener(
-            "task_rate_limited",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
+
+        def decorator(
+            func: Callable[[Dict[str, Any]], None]
+        ) -> Callable[[Dict[str, Any]], None]:
+            """Register a decorated event listener and return the original function."""
+
+            if not callable(func):
+                raise TypeError("decorated event listener must be callable")
+
+            subscription_id = self._register_listener(
+                event,
+                func,
+                function_target=function_target,
+                execution_target=execution_target,
+                allow_reentry=allow_reentry,
+                max_chain_depth=max_chain_depth,
+            )
+
+            # Store the subscription id externally instead of mutating the user's function object.
+            with self._lock:
+                self._decorated_functions[func] = subscription_id
+
+            return func
+
+        if callback is not None:
+            return self._register_listener(
+                event,
+                callback,
+                function_target=function_target,
+                execution_target=execution_target,
+                allow_reentry=allow_reentry,
+                max_chain_depth=max_chain_depth,
+            )
+
+        return decorator
     
-    def on_retry(
-        self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for retry events.
+    def off(self, subscription_id: str | Callable[..., Any]) -> bool:
+        """Remove an event listener subscription.
 
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
+        Accepts either:
+            - a subscription id returned by ``on()``
+            - a decorated listener function
+
+        Returns:
+            True if the subscription existed and was removed,
+            False otherwise.
         """
-        return self._register_listener(
-            "task_retry",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
 
-    def on_error(
-        self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for failure events.
+        callback = None
 
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
-        """
-        return self._register_listener(
-            "task_error",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
+        if callable(subscription_id):
+            callback = subscription_id
+            with self._lock:
+                subscription_id = self._decorated_functions.get(callback)
+
+            if subscription_id is None:
+                return False
+
+        with self._lock:
+            subscription = self._subscriptions.pop(subscription_id, None)
+
+            if subscription is None:
+                return False
+
+            event_name = subscription["event"]
+
+            listeners = self._listeners.get(event_name)
+            if listeners is not None:
+                listeners.pop(subscription_id, None)
+
+                if not listeners:
+                    self._listeners.pop(event_name, None)
+
+        if callback is not None:
+            try:
+                del self._decorated_functions[callback]
+            except AttributeError:
+                pass
+
+        return True
     
-    def on_cancel(
-        self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for cancellation events.
+    def clear(self) -> int:
+        """Remove all event listener subscriptions.
 
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
+        Returns:
+            Number of subscriptions removed.
         """
-        return self._register_listener(
-            "task_cancelled",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
-    
-    def on_end(
+        with self._lock:
+            count = len(self._subscriptions)
+
+            self._listeners.clear()
+            self._subscriptions.clear()
+            self._decorated_functions.clear()
+
+            return count
+
+    def emit(
         self,
-        callback: Callable[[Dict[str, Any]], None],
-        *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
-        allow_reentry: bool = False,
-        max_chain_depth: int = 5,
-    ) -> str:
-        """Register a callback for successful completion events.
-
-        Callback receives the emitted payload dictionary.
-        Returns a subscription id.
-        """
-        return self._register_listener(
-            "task_done",
-            callback,
-            function_target=function_target,
-            execution_target=execution_target,
-            allow_reentry=allow_reentry,
-            max_chain_depth=max_chain_depth,
-        )
-
-    def emit(self, event: str, payload: Dict[str, Any]) -> int:
+        event: Event,
+        payload: Dict[str, Any],
+    ) -> int:
         """Dispatch one emitted event payload to all matching listeners.
 
         Returns the number of callbacks invoked.
         """
-        event_name = str(event or "").strip()
+        event_name = self._event_name(event)
         if not event_name:
             return 0
 
