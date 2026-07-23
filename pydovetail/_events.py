@@ -14,12 +14,12 @@ import threading
 import weakref
 
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
-from enum import StrEnum
+from enum import Enum
 
 if TYPE_CHECKING:
     from .dovetail import Dovetail
 
-class Event(StrEnum):
+class Event(Enum):
     QUEUED = "queued"
     STARTED = "started"
     RETRY = "retry"
