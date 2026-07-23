@@ -87,7 +87,7 @@ class Dovetail:
         timeout: Optional[float] = None,
         retries: int = 0,
         retry_backoff: float = 0.0,
-        shutdown_on_exit: bool = True,
+        shutdown_on_exit: bool = False,
         auto_register: bool = True,
     ):
         # An optional event loop to associate with this helper. When None,
