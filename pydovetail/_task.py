@@ -4,11 +4,8 @@ Helpers for scheduling and bridging sync/async call sites.
 
 from __future__ import annotations
 
-import asyncio
-import functools
-import inspect
-import time
-import weakref
+import time, asyncio
+import functools, weakref, inspect
 
 from typing import Any, Callable, Optional, TYPE_CHECKING
 
@@ -18,6 +15,7 @@ if TYPE_CHECKING:
 from ._events import Event
 
 _SCHEDULE_SENTINEL = object()
+
 
 class Task:
     def __init__(self, dovetail: "Dovetail") -> None:
@@ -37,6 +35,7 @@ class Task:
         # overhead in normal runs.
         if not self.dovetail.events.trace_enabled:
             return
+        
         task_name = task.get_name() if hasattr(task, "get_name") else f"task-{id(task)}"
         self.dovetail.events.trace_struct(
             method="schedule",
@@ -95,6 +94,7 @@ class Task:
             "function": function,
             "execution_id": execution_id,
         }
+        
         # Update cumulative counters for coroutine-based tasks so stats()
         # reflect scheduled/started work (other paths already increment).
         try:
@@ -451,163 +451,150 @@ class Task:
         )
 
     def schedule(
-            self,
-            coro_or_callable: Any = _SCHEDULE_SENTINEL,
-            *args: Any,
-            **kwargs: Any,
-        ) -> Any:
-            """Schedule coroutine/callable from async code and return an asyncio.Task.
-    
-            Can also be used as a decorator:
-    
-                @dvt.task.schedule()
-                async def worker():
-                    ...
-    
-            The decorated function becomes a task factory. Calling it schedules
-            the original coroutine/callable through Dovetail.
-            """
-    
-            # Decorator usage:
-            #
-            # @dvt.task.schedule()
-            # async def worker():
-            #     ...
-            #
-            # Calling worker() schedules it.
-            if coro_or_callable is _SCHEDULE_SENTINEL:
+        self,
+        coro_or_callable: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> asyncio.Task:
+        """Schedule coroutine/callable from async code and return an asyncio.Task."""
+        loop = asyncio.get_running_loop()
 
-                def decorator(fn: Callable[..., Any]) -> Callable[..., asyncio.Task]:
-                    if not callable(fn):
-                        raise TypeError("scheduled target must be callable")
+        if inspect.iscoroutine(coro_or_callable):
+            timeout = self.dovetail._default_timeout
+            coro = coro_or_callable
+            execution_id = self.dovetail._next_execution_id()
+            function_name = getattr(getattr(coro_or_callable, "cr_code", None), "co_name", None)
+            if timeout is not None and timeout > 0:
+                coro = asyncio.wait_for(coro_or_callable, timeout=timeout)
+            task = loop.create_task(coro)
+            self._attach_task_trace(task, "coroutine-object")
+            self._attach_task_events(
+                task,
+                method="schedule",
+                function=function_name,
+                execution_id=execution_id,
+            )
+            return task
 
-                    @functools.wraps(fn)
-                    def wrapper(*wrapper_args: Any, **wrapper_kwargs: Any) -> asyncio.Task:
-                        return self.schedule(
-                            fn,
-                            *wrapper_args,
-                            **wrapper_kwargs,
+        if inspect.iscoroutinefunction(coro_or_callable):
+            label = f"coroutine-function:{self.dovetail._callable_name(coro_or_callable)}"
+            timeout = self.dovetail._default_timeout
+            execution_id = self.dovetail._next_execution_id()
+            function_name = self.dovetail._callable_name(coro_or_callable)
+            coro = coro_or_callable(*args, **kwargs)
+            if timeout is not None and timeout > 0:
+                coro = asyncio.wait_for(coro, timeout=timeout)
+            task = loop.create_task(coro)
+            self._attach_task_trace(task, label)
+            self._attach_task_events(
+                task,
+                method="schedule",
+                function=function_name,
+                execution_id=execution_id,
+            )
+            return task
+
+        if callable(coro_or_callable):
+            fn = functools.partial(coro_or_callable, *args, **kwargs)
+            trace_id = self.dovetail._next_trace_id()
+            execution_id = self.dovetail._next_execution_id()
+            call_name = self.dovetail._callable_name(coro_or_callable)
+            retries, retry_backoff = self._resolve_retry_config()
+
+            async def _run_in_executor() -> Any:
+                self.dovetail.events.trace_struct(
+                    method="schedule",
+                    status="Queued",
+                    task=trace_id,
+                    function=call_name,
+                )
+                self.dovetail.events.inc_stat("queued")
+                self.dovetail._emit_event(
+                    "task_queued",
+                    {
+                        "method": "schedule",
+                        "task": trace_id,
+                        "function": call_name,
+                        "execution_id": execution_id,
+                    },
+                )
+                await self.dovetail._acquire_rate_limit(
+                    method="schedule", task=trace_id, function=call_name
+                )
+
+                def _wrapped() -> Any:
+                    attempt = 0
+                    while True:
+                        attempt += 1
+                        self.dovetail.events.trace_struct(
+                            method="schedule",
+                            status="Start",
+                            task=trace_id,
+                            function=call_name,
+                            extra={"Attempt": attempt},
                         )
-
-                    return wrapper
-
-                return decorator
-
-            if coro_or_callable is _SCHEDULE_SENTINEL:
-                raise TypeError(
-                    "schedule() missing callable/coroutine argument"
-                )
-    
-            loop = asyncio.get_running_loop()
-    
-            if inspect.iscoroutine(coro_or_callable):
-                timeout = self.dovetail._default_timeout
-                coro = coro_or_callable
-                execution_id = self.dovetail._next_execution_id()
-                function_name = getattr(getattr(coro_or_callable, "cr_code", None), "co_name", None)
-                if timeout is not None and timeout > 0:
-                    coro = asyncio.wait_for(coro_or_callable, timeout=timeout)
-                task = loop.create_task(coro)
-                self._attach_task_trace(task, "coroutine-object")
-                self._attach_task_events(
-                    task,
-                    method="schedule",
-                    function=function_name,
-                    execution_id=execution_id,
-                )
-                return task
-    
-            if inspect.iscoroutinefunction(coro_or_callable):
-                label = f"coroutine-function:{self.dovetail._callable_name(coro_or_callable)}"
-                timeout = self.dovetail._default_timeout
-                execution_id = self.dovetail._next_execution_id()
-                function_name = self.dovetail._callable_name(coro_or_callable)
-                coro = coro_or_callable(*args, **kwargs)
-                if timeout is not None and timeout > 0:
-                    coro = asyncio.wait_for(coro, timeout=timeout)
-                task = loop.create_task(coro)
-                self._attach_task_trace(task, label)
-                self._attach_task_events(
-                    task,
-                    method="schedule",
-                    function=function_name,
-                    execution_id=execution_id,
-                )
-                return task
-    
-            if callable(coro_or_callable):
-                fn = functools.partial(coro_or_callable, *args, **kwargs)
-                trace_id = self.dovetail._next_trace_id()
-                execution_id = self.dovetail._next_execution_id()
-                call_name = self.dovetail._callable_name(coro_or_callable)
-                retries, retry_backoff = self._resolve_retry_config()
-    
-                async def _run_in_executor() -> Any:
-                    self.dovetail.events.trace_struct(
-                        method="schedule",
-                        status="Queued",
-                        task=trace_id,
-                        function=call_name,
-                    )
-                    self.dovetail.events.inc_stat("queued")
-                    self.dovetail._emit_event(
-                        Event.QUEUED,
-                        {
-                            "method": "schedule",
-                            "task": trace_id,
-                            "function": call_name,
-                            "execution_id": execution_id,
-                        },
-                    )
-                    await self.dovetail._acquire_rate_limit(
-                        method="schedule", task=trace_id, function=call_name
-                    )
-    
-                    def _wrapped() -> Any:
-                        attempt = 0
-                        while True:
-                            attempt += 1
+                        loop.call_soon_threadsafe(
+                            self.dovetail.events.inc_stat,
+                            "started"
+                        )
+                        loop.call_soon_threadsafe(
+                            self.dovetail._emit_event,
+                            "task_started",
+                            {
+                                "method": "schedule",
+                                "task": trace_id,
+                                "function": call_name,
+                                "execution_id": execution_id,
+                                "attempt": attempt,
+                            },
+                        )
+                        started_at = time.perf_counter()
+                        try:
+                            result = fn()
+                            elapsed = time.perf_counter() - started_at
                             self.dovetail.events.trace_struct(
                                 method="schedule",
-                                status="Start",
+                                status="Done",
                                 task=trace_id,
                                 function=call_name,
+                                elapsed=elapsed,
                                 extra={"Attempt": attempt},
                             )
                             loop.call_soon_threadsafe(
                                 self.dovetail.events.inc_stat,
-                                "started"
+                                "done"
                             )
                             loop.call_soon_threadsafe(
                                 self.dovetail._emit_event,
-                                Event.STARTED,
+                                "task_done",
                                 {
                                     "method": "schedule",
                                     "task": trace_id,
                                     "function": call_name,
                                     "execution_id": execution_id,
                                     "attempt": attempt,
+                                    "elapsed": elapsed,
                                 },
                             )
-                            started_at = time.perf_counter()
-                            try:
-                                result = fn()
-                                elapsed = time.perf_counter() - started_at
-                                self.dovetail.events.trace_struct(
-                                    method="schedule",
-                                    status="Done",
-                                    task=trace_id,
-                                    function=call_name,
-                                    elapsed=elapsed,
-                                    extra={"Attempt": attempt},
-                                )
+                            return result
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - started_at
+                            self.dovetail.events.trace_struct(
+                                method="schedule",
+                                status="Error",
+                                task=trace_id,
+                                function=call_name,
+                                elapsed=elapsed,
+                                extra={"Attempt": attempt, "Error": exc},
+                            )
+                            if attempt > retries:
                                 loop.call_soon_threadsafe(
                                     self.dovetail.events.inc_stat,
-                                    "done"
+                                    "error"
                                 )
                                 loop.call_soon_threadsafe(
                                     self.dovetail._emit_event,
-                                    Event.DONE,
+                                    "task_error",
                                     {
                                         "method": "schedule",
                                         "task": trace_id,
@@ -615,77 +602,49 @@ class Task:
                                         "execution_id": execution_id,
                                         "attempt": attempt,
                                         "elapsed": elapsed,
-                                    },
-                                )
-                                return result
-                            except Exception as exc:
-                                elapsed = time.perf_counter() - started_at
-                                self.dovetail.events.trace_struct(
-                                    method="schedule",
-                                    status="Error",
-                                    task=trace_id,
-                                    function=call_name,
-                                    elapsed=elapsed,
-                                    extra={"Attempt": attempt, "Error": exc},
-                                )
-                                if attempt > retries:
-                                    loop.call_soon_threadsafe(
-                                        self.dovetail.events.inc_stat,
-                                        "error"
-                                    )
-                                    loop.call_soon_threadsafe(
-                                        self.dovetail._emit_event,
-                                        Event.ERROR,
-                                        {
-                                            "method": "schedule",
-                                            "task": trace_id,
-                                            "function": call_name,
-                                            "execution_id": execution_id,
-                                            "attempt": attempt,
-                                            "elapsed": elapsed,
-                                            "error": exc,
-                                        },
-                                    )
-                                    raise
-                                sleep_for = retry_backoff * (2 ** (attempt - 1)) if retry_backoff > 0 else 0.0
-                                loop.call_soon_threadsafe(
-                                    self.dovetail.events.inc_stat,
-                                    "retries"
-                                )
-                                self.dovetail.events.trace_struct(
-                                    method="schedule",
-                                    status="Retry",
-                                    task=trace_id,
-                                    function=call_name,
-                                    extra={"Attempt": attempt, "Sleep": f"{sleep_for:.3f}s", "Error": exc},
-                                )
-                                loop.call_soon_threadsafe(
-                                    self.dovetail._emit_event,
-                                    Event.RETRY,
-                                    {
-                                        "method": "schedule",
-                                        "task": trace_id,
-                                        "function": call_name,
-                                        "execution_id": execution_id,
-                                        "attempt": attempt,
-                                        "sleep": sleep_for,
                                         "error": exc,
                                     },
                                 )
-                                if sleep_for > 0:
-                                    time.sleep(sleep_for)
-    
-                    future = loop.run_in_executor(self.dovetail._threadpool, _wrapped)
-                    timeout = self.dovetail._default_timeout
-                    if timeout is None or timeout <= 0:
-                        return await future
-                    return await asyncio.wait_for(future, timeout=timeout)
-    
-                task = loop.create_task(_run_in_executor())
-                self._attach_task_trace(task, f"callable:{call_name}")
-                return task
-    
-            raise TypeError("coro_or_callable must be a coroutine, async function, or callable")
+                                raise
+                            sleep_for = retry_backoff * (2 ** (attempt - 1)) if retry_backoff > 0 else 0.0
+                            loop.call_soon_threadsafe(
+                                self.dovetail.events.inc_stat,
+                                "retries"
+                            )
+                            self.dovetail.events.trace_struct(
+                                method="schedule",
+                                status="Retry",
+                                task=trace_id,
+                                function=call_name,
+                                extra={"Attempt": attempt, "Sleep": f"{sleep_for:.3f}s", "Error": exc},
+                            )
+                            loop.call_soon_threadsafe(
+                                self.dovetail._emit_event,
+                                "task_retry",
+                                {
+                                    "method": "schedule",
+                                    "task": trace_id,
+                                    "function": call_name,
+                                    "execution_id": execution_id,
+                                    "attempt": attempt,
+                                    "sleep": sleep_for,
+                                    "error": exc,
+                                },
+                            )
+                            if sleep_for > 0:
+                                time.sleep(sleep_for)
+
+                future = loop.run_in_executor(self.dovetail._threadpool, _wrapped)
+                timeout = self.dovetail._default_timeout
+                if timeout is None or timeout <= 0:
+                    return await future
+                return await asyncio.wait_for(future, timeout=timeout)
+
+            task = loop.create_task(_run_in_executor())
+            self._attach_task_trace(task, f"callable:{call_name}")
+            return task
+
+        raise TypeError("coro_or_callable must be a coroutine, async function, or callable")
         
     def managed(
             self,
