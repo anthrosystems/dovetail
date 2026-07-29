@@ -50,7 +50,7 @@ Reading the results table:
                   scheduling noise.
 
 
-  Ceiling Hit   — how closely the implementation reached its theoretical
+  Ideal Ceiling   — how closely the implementation reached its theoretical
                   completion limit:
 
                       Expected / Actual X 100%
@@ -69,10 +69,6 @@ Reading the results table:
                   A value of 10x means the workload completed ten times
                   faster than running tasks sequentially.
 
-
-The benchmark also reports the maximum theoretical speedup:
-
-    serial_time / ideal_parallel_time = tasks
 
 This represents the mathematical maximum if every task overlaps
 perfectly with zero scheduling overhead.
@@ -102,11 +98,11 @@ from typing import List
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)) # Ensure local package is benchmarked, not PyPI release
 
-from pydovetail import Dovetail, Event
+from pydovetail import Dovetail
 
 
 # Module-level logger used when enabling Dovetail trace output from main()
-logger = logging.getLogger("dovetail-benchmark")
+logger = logging.getLogger("dovetail.benchmark")
 logger.addHandler(logging.NullHandler())
 
 
@@ -151,28 +147,28 @@ def attach_observers(dvt: Dovetail, mode_name: str) -> None:
     tag = f"  [{mode_name}]"
 
     dvt.events.on(
-        Event.QUEUED,
+        dvt.TaskEvent.QUEUED,
         lambda p: print(
             f"{tag} queued    {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
         ),
     )
 
     dvt.events.on(
-        Event.STARTED,
+        dvt.TaskEvent.STARTED,
         lambda p: print(
             f"{tag} started   {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
         ),
     )
 
     dvt.events.on(
-        Event.DONE,
+        dvt.TaskEvent.DONE,
         lambda p: print(
             f"{tag} done      {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
         ),
     )
 
     dvt.events.on(
-        Event.ERROR,
+        dvt.TaskEvent.ERROR,
         lambda p: print(
             f"{tag} ERROR     {p.get('execution_id', '?')}  "
             f"fn={p.get('function', '?')}  exc={p.get('exception', '?')}"
@@ -180,7 +176,7 @@ def attach_observers(dvt: Dovetail, mode_name: str) -> None:
     )
 
     dvt.events.on(
-        Event.RETRY,
+        dvt.TaskEvent.RETRY,
         lambda p: print(
             f"{tag} retry     {p.get('execution_id', '?')}  "
             f"fn={p.get('function', '?')}  attempt={p.get('attempt', '?')}"
@@ -188,7 +184,7 @@ def attach_observers(dvt: Dovetail, mode_name: str) -> None:
     )
 
     dvt.events.on(
-        Event.CANCELLED,
+        dvt.TaskEvent.CANCELLED,
         lambda p: print(
             f"{tag} cancelled {p.get('execution_id', '?')}  fn={p.get('function', '?')}"
         ),
@@ -340,7 +336,7 @@ def print_results(n: int, duration: float, results: dict) -> None:
     print("Columns:")
     print("     Expected       — theoretical completion time for this execution model")
     print("     Actual         — measured wall-clock time (median across runs)")
-    print("     Ceiling Hit    — how close the run got to its theoretical limit")
+    print("     Ideal Ceiling    — how close the run got to its theoretical limit")
     print("     Speedup        — improvement compared to serial execution")
     print()
 
@@ -360,7 +356,7 @@ def print_results(n: int, duration: float, results: dict) -> None:
         f"  {'Mode':<{col_w}}"
         f" {'Expected':>12}"
         f" {'Actual':>12}"
-        f" {'Ceiling Hit':>14}"
+        f" {'Ideal Ceiling':>14}"
         f" {'Speedup':>12}"
     )
 
@@ -381,8 +377,7 @@ def print_results(n: int, duration: float, results: dict) -> None:
         )
 
     print()
-    print(f"  Theoretical minimum:          {duration*1000:.0f}ms")
-    print(f"  Maximum theoretical speedup:  {theoretical_max_speedup:.1f}x")
+    print(f"  Theoretical lower bound:          {duration*1000:.0f}ms")
     print()
 
     print("  Achieved speedup ceiling:")

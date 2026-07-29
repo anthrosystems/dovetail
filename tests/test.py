@@ -37,18 +37,18 @@ Coverage:
     - auto_register=False
     - duplicate registration is safe
     - shutdown() removes instance from registry
-    - shutdown_all() shuts down all instances
-    - shutdown_all() triggers app shutdown hook
+    - shutdown() shuts down all instances
+    - shutdown() triggers app shutdown hook
     - garbage collection removes dead instances
     - registry does not retain dead Dovetail objects
 
   Events
-    - on(Event.QUEUED) / on(Event.STARTED) / on(Event.DONE) / on(Event.ERROR) /
-      on(Event.RETRY) / on(Event.CANCELLED) / on(Event.RATE_LIMITED), each
+    - on(dvt.TaskEvent.QUEUED) / on(dvt.TaskEvent.STARTED) / on(dvt.TaskEvent.DONE) / on(dvt.TaskEvent.ERROR) /
+      on(dvt.TaskEvent.RETRY) / on(dvt.TaskEvent.CANCELLED) / on(dvt.TaskEvent.RATE_LIMITED), each
       exercised directly
     - event ordering across a single call (queued -> started -> done)
-    - on(Event.STARTED) fires once per retry attempt with correct attempt numbers
-    - retry exhaustion: on(Event.RETRY) count + final on(Event.ERROR) count
+    - on(dvt.TaskEvent.STARTED) fires once per retry attempt with correct attempt numbers
+    - retry exhaustion: on(dvt.TaskEvent.RETRY) count + final on(dvt.TaskEvent.ERROR) count
     - global (unscoped) listeners
     - function_target scoping
     - execution_target scoping
@@ -57,7 +57,7 @@ Coverage:
     - max_chain_depth < 1 raises ValueError
     - reentry disallowed (default) blocks a callback calling itself
     - reentry allowed, bounded by max_chain_depth
-    - chained scheduling from within an on(Event.DONE) callback (docs pattern)
+    - chained scheduling from within an on(dvt.TaskEvent.DONE) callback (docs pattern)
     - documented pitfall: passing a Task (not a function) as a callback
       raises TypeError
 
@@ -70,16 +70,15 @@ Coverage:
     - inc_stat() accumulates a custom counter alongside the built-ins
 """
 
-
-import asyncio
-import logging
 import sys
-import threading
 import time
-import inspect
-import traceback
+import logging
+import asyncio
+import threading
 import gc
 import weakref
+import inspect
+import traceback
 
 from pathlib import Path
 from typing import Any, Callable
@@ -87,16 +86,16 @@ from typing import Any, Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)) # Ensure local package is tested, not PyPI release
 
-from pydovetail import (
-    Dovetail,
-    Event,
-    register,
-    unregister,
-    list_active,
-    shutdown_all,
-    set_app_shutdown_hook,
+from pydovetail import Dovetail, DovetailRegistry
+
+# Module-level logger used when enabling Dovetail trace output
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(message)s",
 )
-from pydovetail._register import global_registry
+_test_logger = logging.getLogger("dovetail.test")
+_test_logger.setLevel(logging.DEBUG)
+_test_logger.propagate = True
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +149,24 @@ def run_test(name: str, fn: Callable[[], Any]) -> None:
     try:
         fn()
         RESULTS.record_pass(name)
+
     except Exception as exc:
         RESULTS.record_fail(name, exc)
-        traceback.print_exc()
+
+        # Save traceback before clearing exception references
+        tb = exc.__traceback__
+
+        traceback.print_exception(type(exc), exc, tb)
+
+        # Break traceback -> frame -> locals reference chain
+        if tb is not None:
+            traceback.clear_frames(tb)
+
+        exc.__traceback__ = None
+
+        # Remove local references
+        del tb
+        del exc
 
 
 async def run_async_test(name: str, coro_fn: Callable[[], Any]) -> None:
@@ -161,9 +175,21 @@ async def run_async_test(name: str, coro_fn: Callable[[], Any]) -> None:
     try:
         await coro_fn()
         RESULTS.record_pass(name)
+
     except Exception as exc:
         RESULTS.record_fail(name, exc)
-        traceback.print_exc()
+
+        tb = exc.__traceback__
+
+        traceback.print_exception(type(exc), exc, tb)
+
+        if tb is not None:
+            traceback.clear_frames(tb)
+
+        exc.__traceback__ = None
+
+        del tb
+        del exc
 
 
 # ===========================================================================
@@ -173,7 +199,12 @@ async def run_async_test(name: str, coro_fn: Callable[[], Any]) -> None:
 # ===========================================================================
 
 def test_run_blocking_callable() -> None:
-    with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         check_equal(
             dvt.task.run_blocking(lambda: 41 + 1),
             42,
@@ -182,7 +213,11 @@ def test_run_blocking_callable() -> None:
 
 
 def test_run_blocking_coroutine_function() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def work(value: int) -> int:
             await asyncio.sleep(0.001)
             return value + 1
@@ -195,7 +230,11 @@ def test_run_blocking_coroutine_function() -> None:
 
 
 def test_run_blocking_coroutine_object() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def work() -> int:
             await asyncio.sleep(0.001)
             return 42
@@ -208,7 +247,11 @@ def test_run_blocking_coroutine_object() -> None:
 
 
 def test_to_thread_blocking() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         check_equal(
             dvt.task.to_thread_blocking(lambda value: value + 1, 41),
             42,
@@ -217,7 +260,11 @@ def test_to_thread_blocking() -> None:
 
 
 def test_map_blocking_basic() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         check_equal(
             dvt.task.map_blocking(
                 lambda value: value * 2,
@@ -230,7 +277,11 @@ def test_map_blocking_basic() -> None:
 
 
 def test_map_blocking_empty_items() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         check_equal(
             dvt.task.map_blocking(lambda value: value, []),
             [],
@@ -239,7 +290,12 @@ def test_map_blocking_empty_items() -> None:
 
 
 def test_map_blocking_max_concurrency_enforced() -> None:
-    with Dovetail(max_workers=8, shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        max_workers=8,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         state = {"active": 0, "peak": 0}
         lock = threading.Lock()
 
@@ -261,7 +317,11 @@ def test_map_blocking_max_concurrency_enforced() -> None:
 
 
 def test_map_blocking_return_exceptions_true() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def maybe_fail(value: int) -> int:
             if value == 2:
                 raise ValueError("bad value")
@@ -282,7 +342,11 @@ def test_map_blocking_return_exceptions_true() -> None:
 
 
 def test_map_blocking_return_exceptions_false_raises() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def maybe_fail(value: int) -> int:
             if value == 2:
                 raise ValueError("bad value")
@@ -307,7 +371,13 @@ def test_retry_handling() -> None:
             raise RuntimeError("transient failure")
         return 7
 
-    with Dovetail(retries=1, retry_backoff=0.0, shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        retries=1,
+        retry_backoff=0.0,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         check_equal(
             dvt.task.to_thread_blocking(flaky),
             7,
@@ -320,48 +390,66 @@ def test_retry_handling() -> None:
 
 
 def test_shutdown_idempotent() -> None:
-    dvt = Dovetail(shutdown_on_exit=False)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     dvt.shutdown()
     dvt.shutdown()  # must not raise the second time
     check(dvt.is_shutdown, "shutdown() should mark the instance as shut down")
 
 
 def test_shutdown_wait_false() -> None:
-    dvt = Dovetail(shutdown_on_exit=False)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     dvt.shutdown(wait=False)
     check(dvt.is_shutdown, "shutdown(wait=False) should still mark shutdown")
 
 
 def test_sync_context_manager_shuts_down_on_exit() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         pass
     check(dvt.is_shutdown, "sync context manager should shut down on block exit")
 
 
 def test_registry_auto_register_and_list_active() -> None:
-    dvt = Dovetail(shutdown_on_exit=False)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     try:
         check(
-            any(item is dvt for item in list_active()),
+            any(item is dvt for item in DovetailRegistry.list_active()),
             "auto-registered instance should appear in list_active()",
         )
     finally:
-        unregister(dvt)
+        DovetailRegistry.unregister(dvt)
         dvt.shutdown()
 
 
 def test_registry_duplicate_registration_is_safe() -> None:
     dvt = Dovetail(
-        shutdown_on_exit=False,
         auto_register=False,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
     )
 
     try:
-        register(dvt)
-        register(dvt)
+        DovetailRegistry.register(dvt)
+        DovetailRegistry.register(dvt)
 
         instances = [
-            item for item in list_active()
+            item for item in DovetailRegistry.list_active()
             if item is dvt
         ]
 
@@ -372,25 +460,34 @@ def test_registry_duplicate_registration_is_safe() -> None:
         )
 
     finally:
-        unregister(dvt)
+        DovetailRegistry.unregister(dvt)
         dvt.shutdown()
 
 
 def test_registry_unregister_removes_instance() -> None:
-    dvt = Dovetail(shutdown_on_exit=False)
-    unregister(dvt)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
+    DovetailRegistry.unregister(dvt)
     check(
-        not any(item is dvt for item in list_active()),
+        not any(item is dvt for item in DovetailRegistry.list_active()),
         "unregistered instance should not appear in list_active()",
     )
     dvt.shutdown()
 
 
 def test_registry_auto_register_false() -> None:
-    dvt = Dovetail(shutdown_on_exit=False, auto_register=False)
+    dvt = Dovetail(
+        auto_register=False,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     try:
         check(
-            not any(item is dvt for item in list_active()),
+            not any(item is dvt for item in DovetailRegistry.list_active()),
             "auto_register=False should keep the instance out of list_active()",
         )
     finally:
@@ -398,50 +495,68 @@ def test_registry_auto_register_false() -> None:
 
 
 def test_registry_shutdown_all() -> None:
-    d1 = Dovetail(shutdown_on_exit=False)
-    d2 = Dovetail(shutdown_on_exit=False)
+    d1 = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
+    d2 = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
+    
     try:
-        shutdown_all()
+        DovetailRegistry.shutdown()
         check(
-            d1 not in list_active(),
-            "shutdown_all should remove d1"
+            d1 not in DovetailRegistry.list_active(),
+            "shutdown should remove d1"
         )
 
         check(
-            d2 not in list_active(),
-            "shutdown_all should remove d2"
+            d2 not in DovetailRegistry.list_active(),
+            "shutdown should remove d2"
         )
     finally:
-        unregister(d1)
-        unregister(d2)
+        DovetailRegistry.unregister(d1)
+        DovetailRegistry.unregister(d2)
 
 
 def test_registry_shutdown_removes_instance() -> None:
-    dvt = Dovetail(shutdown_on_exit=False)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
 
     check(
-        any(item is dvt for item in list_active()),
+        any(item is dvt for item in DovetailRegistry.list_active()),
         "instance should be registered",
     )
 
     dvt.shutdown()
 
     check(
-        not any(item is dvt for item in list_active()),
+        not any(item is dvt for item in DovetailRegistry.list_active()),
         "shutdown should unregister instance",
     )
 
 
 def test_registry_shutdown_hook_executes() -> None:
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     calls = {"count": 0}
 
     def hook() -> None:
         calls["count"] += 1
 
-    set_app_shutdown_hook(hook)
+    DovetailRegistry.set_app_shutdown_hook(hook)
 
     try:
-        global_registry.call_app_hook_or_shutdown()
+        DovetailRegistry.call_app_hook_or_shutdown()
 
         check_equal(
             calls["count"],
@@ -450,24 +565,25 @@ def test_registry_shutdown_hook_executes() -> None:
         )
 
     finally:
-        set_app_shutdown_hook(None)
+        DovetailRegistry.set_app_shutdown_hook(None)
 
 
 def debug_dovetail_refs():
     """
     Finds and prints all objects holding a strong reference to the target instance.
     """
-    print("\n--- GC Referrers Debug ---")
     
-    dvt = Dovetail(shutdown_on_exit=False)
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     
     # Force a garbage collection pass to clear any unreferenced cycles
     gc.collect() 
     
     # Retrieve everything that refers to our instance
-    referrers = gc.get_referrers(dvt)
-    
-    for ref in referrers:
+    for ref in gc.get_referrers(dvt):
         # Filter out the current frame to reduce noise
         if inspect.isframe(ref) and ref.f_code.co_name == 'debug_dovetail_refs':
             continue
@@ -491,31 +607,68 @@ def debug_dovetail_refs():
             print(f"Object Representation: {ref}")
             
         print("-" * 40)
+    
+    del dvt
+    gc.collect()
 
 
 def test_registry_gc_cleanup() -> None:
     def create_ref():
-        dvt = Dovetail(shutdown_on_exit=False)
+        dvt = Dovetail(
+            trace=False,
+            trace_logger=_test_logger,
+            trace_prefix="TEST",
+        )
         return weakref.ref(dvt)
 
     ref = create_ref()
+    print(sys.getrefcount(ref()))
 
-    # A single collect() isn't a hard guarantee for cyclic garbage —
-    # retry a few times before concluding it's truly stuck.
     for _ in range(5):
+        gc.collect()
         if ref() is None:
             break
-        gc.collect()
 
     if ref() is not None:
         print("\nDVT still alive after retries")
-        # Diagnostics only — do NOT bind a new strong reference here.
-        for r in gc.get_referrers(ref()):
+
+        for r in list(gc.get_referrers(ref())):
             print("\n---")
-            print(type(r))
-            print(r)
-        # any objgraph diagnostics should also call ref() fresh inline,
-        # never store the result in a local that outlives this branch
+            print("TYPE:", type(r))
+
+            if inspect.isframe(r):
+                print(
+                    "FRAME:",
+                    r.f_code.co_filename,
+                    r.f_code.co_name,
+                    r.f_lineno,
+                )
+                
+                if inspect.isframe(r):
+                    print(r)
+                    print(r.f_locals)
+
+                    print("Back:", r.f_back)
+                    print("Trace:", r.f_trace)
+
+            elif isinstance(r, dict):
+                print("DICT KEYS:", list(r.keys()))
+
+            else:
+                print(repr(r))
+    
+    for frame in gc.get_referrers(ref()):
+        if inspect.isframe(frame):
+            print(frame.f_code.co_name)
+
+            owners = gc.get_referrers(frame)
+
+            print("Owned by:")
+            for owner in owners:
+                print(type(owner))
+                print(repr(owner)[:200])
+
+    gc.collect()
 
     check(
         ref() is None,
@@ -524,13 +677,17 @@ def test_registry_gc_cleanup() -> None:
 
 
 def test_events_function_and_instance_target_raises() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def dummy() -> None:
             pass
 
         try:
             dvt.events.on(
-                Event.STARTED,
+                dvt.TaskEvent.STARTED,
                 lambda payload: None,
                 function_target=dummy,
                 execution_target="exec-1",
@@ -544,9 +701,13 @@ def test_events_function_and_instance_target_raises() -> None:
 
 
 def test_events_invalid_callback_raises_type_error() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         try:
-            dvt.events.on(Event.STARTED, "not callable")  # type: ignore[arg-type]
+            dvt.events.on(dvt.TaskEvent.STARTED, "not callable")  # type: ignore[arg-type]
         except TypeError:
             pass
         else:
@@ -554,9 +715,13 @@ def test_events_invalid_callback_raises_type_error() -> None:
 
 
 def test_events_max_chain_depth_invalid_raises() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         try:
-            dvt.events.on(Event.STARTED, lambda payload: None, max_chain_depth=0)
+            dvt.events.on(dvt.TaskEvent.STARTED, lambda payload: None, max_chain_depth=0)
         except ValueError:
             pass
         else:
@@ -564,16 +729,20 @@ def test_events_max_chain_depth_invalid_raises() -> None:
 
 
 def test_events_reentry_disallowed_by_default() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         call_count = {"n": 0}
 
         def cb(payload: dict) -> None:
             call_count["n"] += 1
             if call_count["n"] < 3:
-                dvt.events.emit(Event.QUEUED, {"function": None})
+                dvt.events.emit(dvt.TaskEvent.QUEUED, {"function": None})
 
-        dvt.events.on(Event.QUEUED, cb, allow_reentry=False)
-        dvt.events.emit(Event.QUEUED, {"function": None})
+        dvt.events.on(dvt.TaskEvent.QUEUED, cb, allow_reentry=False)
+        dvt.events.emit(dvt.TaskEvent.QUEUED, {"function": None})
 
         check_equal(
             call_count["n"],
@@ -583,16 +752,20 @@ def test_events_reentry_disallowed_by_default() -> None:
 
 
 def test_events_reentry_allowed_bounded_by_max_chain_depth() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         call_count = {"n": 0}
 
         def cb(payload: dict) -> None:
             call_count["n"] += 1
             if call_count["n"] < 10:
-                dvt.events.emit(Event.STARTED, {"function": None})
+                dvt.events.emit(dvt.TaskEvent.STARTED, {"function": None})
 
-        dvt.events.on(Event.STARTED, cb, allow_reentry=True, max_chain_depth=3)
-        dvt.events.emit(Event.STARTED, {"function": None})
+        dvt.events.on(dvt.TaskEvent.STARTED, cb, allow_reentry=True, max_chain_depth=3)
+        dvt.events.emit(dvt.TaskEvent.STARTED, {"function": None})
 
         check_equal(
             call_count["n"],
@@ -602,19 +775,25 @@ def test_events_reentry_allowed_bounded_by_max_chain_depth() -> None:
 
 
 def test_events_off_removes_subscription():
-    dvt = Dovetail()
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
+    
+    dvt.TaskEvent.DONE
     
     calls = []
 
     def listener(payload):
         calls.append(payload)
 
-    subscription_id = dvt.events.on(Event.DONE, listener)
+    subscription_id = dvt.events.on(dvt.TaskEvent.DONE, listener)
 
     assert dvt.events.off(subscription_id) is True
 
-    dvt._emit_event(
-        Event.DONE,
+    dvt.events.emit(
+        dvt.TaskEvent.DONE,
         {"function": "test_func", "execution_id": "exec-1"},
     )
 
@@ -622,23 +801,31 @@ def test_events_off_removes_subscription():
 
 
 def test_events_off_unknown_subscription_returns_false():
-    dvt = Dovetail()
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     assert dvt.events.off("sub-does-not-exist") is False
 
 
 def test_events_off_accepts_decorated_listener():
-    dvt = Dovetail()
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     
     calls = []
 
-    @dvt.events.on(Event.DONE)
+    @dvt.events.on(dvt.TaskEvent.DONE)
     def listener(payload):
         calls.append(payload)
 
     assert dvt.events.off(listener) is True
 
-    dvt._emit_event(
-        Event.DONE,
+    dvt.events.emit(
+        dvt.TaskEvent.DONE,
         {"function": "test_func", "execution_id": "exec-1"},
     )
 
@@ -646,7 +833,11 @@ def test_events_off_accepts_decorated_listener():
 
 
 def test_events_clear_removes_all_listeners():
-    dvt = Dovetail()
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     
     calls = []
 
@@ -656,19 +847,19 @@ def test_events_clear_removes_all_listeners():
     def listener_two(payload):
         calls.append(("two", payload))
 
-    dvt.events.on(Event.DONE, listener_one)
-    dvt.events.on(Event.ERROR, listener_two)
+    dvt.events.on(dvt.TaskEvent.DONE, listener_one)
+    dvt.events.on(dvt.TaskEvent.ERROR, listener_two)
 
     removed = dvt.events.clear()
 
     assert removed == 2
 
-    dvt._emit_event(
-        Event.DONE,
+    dvt.events.emit(
+        dvt.TaskEvent.DONE,
         {"function": "test_func", "execution_id": "exec-1"},
     )
-    dvt._emit_event(
-        Event.ERROR,
+    dvt.events.emit(
+        dvt.TaskEvent.ERROR,
         {"function": "test_func", "execution_id": "exec-2"},
     )
 
@@ -676,7 +867,11 @@ def test_events_clear_removes_all_listeners():
 
 
 def test_events_clear_returns_zero_when_empty():
-    dvt = Dovetail()
+    dvt = Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    )
     assert dvt.events.clear() == 0
 
 
@@ -687,7 +882,7 @@ def test_tracing_and_instrumentation() -> None:
         def emit(self, record: logging.LogRecord) -> None:
             captured.append(record.getMessage())
 
-    logger = logging.getLogger("test.dovetail.tracing")
+    logger = _test_logger
     logger.setLevel(logging.DEBUG)
     handler = ListHandler()
     handler.setLevel(logging.DEBUG)
@@ -696,9 +891,8 @@ def test_tracing_and_instrumentation() -> None:
     try:
         with Dovetail(
             trace=True,
-            trace_logger=logger,
+            trace_logger=_test_logger,
             trace_prefix="TraceTest",
-            shutdown_on_exit=False,
         ) as dvt:
             dvt.events.trace("custom trace message")
             dvt.events.trace_struct(
@@ -735,7 +929,7 @@ def test_shutdown_emits_trace() -> None:
         def emit(self, record):
             captured.append(record.getMessage())
 
-    logger = logging.getLogger("dovetail.registry.test")
+    logger = _test_logger
     logger.setLevel(logging.DEBUG)
 
     handler = Handler()
@@ -744,15 +938,14 @@ def test_shutdown_emits_trace() -> None:
     try:
         _d1 = Dovetail(
             trace=True,
-            trace_logger=logger,
-            shutdown_on_exit=False,
+            trace_logger=_test_logger,
         )
 
-        shutdown_all()
+        DovetailRegistry.shutdown()
 
         check(
             any("Shutdown" in msg for msg in captured),
-            "shutdown_all should trigger shutdown logging",
+            "shutdown should trigger shutdown logging",
         )
 
     finally:
@@ -765,7 +958,11 @@ def test_shutdown_emits_trace() -> None:
 # ===========================================================================
 
 async def test_run_blocking_raises_in_running_loop() -> None:
-    with Dovetail(shutdown_on_exit=False) as dvt:
+    with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         try:
             dvt.task.run_blocking(lambda: 1)
         except RuntimeError:
@@ -777,13 +974,23 @@ async def test_run_blocking_raises_in_running_loop() -> None:
 
 
 async def test_to_thread_basic() -> None:
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         result = await dvt.task.to_thread(lambda: "thread")
         check_equal(result, "thread", "to_thread basic result")
 
 
 async def test_to_thread_timeout() -> None:
-    async with Dovetail(timeout=0.01, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        timeout=0.01,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def slow() -> str:
             time.sleep(0.05)
             return "done"
@@ -800,7 +1007,11 @@ async def test_to_thread_timeout() -> None:
 
 
 async def test_schedule_coroutine_object() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def work() -> str:
             await asyncio.sleep(0.001)
             return "coro-object"
@@ -810,7 +1021,11 @@ async def test_schedule_coroutine_object() -> None:
 
 
 async def test_schedule_coroutine_function() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def work(value: int) -> int:
             await asyncio.sleep(0.001)
             return value * 2
@@ -820,7 +1035,11 @@ async def test_schedule_coroutine_function() -> None:
 
 
 async def test_schedule_callable() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def work(x: int, y: int) -> int:
             return x + y
 
@@ -829,7 +1048,11 @@ async def test_schedule_callable() -> None:
 
 
 async def test_schedule_invalid_type_raises() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         try:
             dvt.task.schedule(12345)  # not a coroutine, coroutine function, or callable
         except TypeError:
@@ -841,7 +1064,12 @@ async def test_schedule_invalid_type_raises() -> None:
 
 
 async def test_schedule_timeout_coroutine() -> None:
-    async with Dovetail(timeout=0.01, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        timeout=0.01,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def slow() -> str:
             await asyncio.sleep(0.05)
             return "done"
@@ -858,21 +1086,29 @@ async def test_schedule_timeout_coroutine() -> None:
 
 
 async def test_async_context_manager_shuts_down_on_exit() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         pass
     check(dvt.is_shutdown, "async context manager should shut down on block exit")
 
 
 async def test_event_ordering_queued_started_done() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         order: list[str] = []
 
         def f() -> str:
             return "ok"
 
-        dvt.events.on(Event.QUEUED, lambda p: order.append("queued"), function_target=f)
-        dvt.events.on(Event.STARTED, lambda p: order.append("started"), function_target=f)
-        dvt.events.on(Event.DONE, lambda p: order.append("done"), function_target=f)
+        dvt.events.on(dvt.TaskEvent.QUEUED, lambda p: order.append("queued"), function_target=f)
+        dvt.events.on(dvt.TaskEvent.STARTED, lambda p: order.append("started"), function_target=f)
+        dvt.events.on(dvt.TaskEvent.DONE, lambda p: order.append("done"), function_target=f)
 
         result = await dvt.task.to_thread(f)
 
@@ -885,9 +1121,14 @@ async def test_event_ordering_queued_started_done() -> None:
 
 
 async def test_global_listener_fires_for_every_function() -> None:
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         hits: list[Any] = []
-        dvt.events.on(Event.DONE, lambda p: hits.append(p.get("function")))
+        dvt.events.on(dvt.TaskEvent.DONE, lambda p: hits.append(p.get("function")))
 
         def f1() -> int:
             return 1
@@ -902,7 +1143,12 @@ async def test_global_listener_fires_for_every_function() -> None:
 
 
 async def test_function_target_scoping() -> None:
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         hits_a: list[Any] = []
 
         def func_a() -> str:
@@ -912,7 +1158,7 @@ async def test_function_target_scoping() -> None:
             return "b"
 
         dvt.events.on(
-            Event.DONE,
+            dvt.TaskEvent.DONE,
             lambda p: hits_a.append(p.get("function")),
             function_target=func_a,
         )
@@ -928,13 +1174,18 @@ async def test_function_target_scoping() -> None:
 
 
 async def test_instance_target_scoping() -> None:
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         def sample() -> str:
             return "x"
 
         ids: list[Any] = []
         dvt.events.on(
-            Event.STARTED,
+            dvt.TaskEvent.STARTED,
             lambda p: ids.append(p.get("execution_id")),
             function_target=sample,
         )
@@ -949,7 +1200,7 @@ async def test_instance_target_scoping() -> None:
 
         hits_first: list[Any] = []
         dvt.events.on(
-            Event.DONE,
+            dvt.TaskEvent.DONE,
             lambda p: hits_first.append(p.get("execution_id")),
             execution_target=first_id,
         )
@@ -965,14 +1216,18 @@ async def test_instance_target_scoping() -> None:
 
 
 async def test_event_callback_exception_does_not_break_task() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         callback_errors: list[str] = []
 
         def bad_callback(payload: dict) -> None:
             callback_errors.append("called")
             raise RuntimeError("listener exploded")
 
-        dvt.events.on(Event.DONE, bad_callback)
+        dvt.events.on(dvt.TaskEvent.DONE, bad_callback)
 
         result = await dvt.task.to_thread(lambda: 42)
 
@@ -990,7 +1245,13 @@ async def test_event_callback_exception_does_not_break_task() -> None:
 
 
 async def test_retry_exhaustion_and_error_event() -> None:
-    async with Dovetail(retries=2, retry_backoff=0.0, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        retries=2,
+        retry_backoff=0.0,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         retry_hits: list[Any] = []
         error_hits: list[Any] = []
 
@@ -998,12 +1259,12 @@ async def test_retry_exhaustion_and_error_event() -> None:
             raise RuntimeError("boom")
 
         dvt.events.on(
-            Event.RETRY,
+            dvt.TaskEvent.RETRY,
             lambda p: retry_hits.append(p.get("attempt")),
             function_target=always_fails,
         )
         dvt.events.on(
-            Event.ERROR,
+            dvt.TaskEvent.ERROR,
             lambda p: error_hits.append(p.get("attempt")),
             function_target=always_fails,
         )
@@ -1026,7 +1287,13 @@ async def test_retry_exhaustion_and_error_event() -> None:
 
 
 async def test_started_fires_once_per_retry_attempt() -> None:
-    async with Dovetail(retries=2, retry_backoff=0.0, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        retries=2,
+        retry_backoff=0.0,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         attempts_seen: list[Any] = []
         state = {"n": 0}
 
@@ -1037,7 +1304,7 @@ async def test_started_fires_once_per_retry_attempt() -> None:
             return "ok"
 
         dvt.events.on(
-            Event.STARTED,
+            dvt.TaskEvent.STARTED,
             lambda p: attempts_seen.append(p.get("attempt")),
             function_target=flaky,
         )
@@ -1048,14 +1315,19 @@ async def test_started_fires_once_per_retry_attempt() -> None:
         check_equal(
             attempts_seen,
             [1, 2, 3],
-            "on(Event.STARTED) should fire once per attempt with the correct attempt number",
+            "on(dvt.TaskEvent.STARTED) should fire once per attempt with the correct attempt number",
         )
 
 
 async def test_cancellation_event() -> None:
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         cancel_hits: list[Any] = []
-        dvt.events.on(Event.CANCELLED, lambda p: cancel_hits.append(p.get("execution_id")))
+        dvt.events.on(dvt.TaskEvent.CANCELLED, lambda p: cancel_hits.append(p.get("execution_id")))
 
         task = dvt.task.schedule(asyncio.sleep(0.2))
         await asyncio.sleep(0.01)
@@ -1063,17 +1335,19 @@ async def test_cancellation_event() -> None:
         await asyncio.gather(task, return_exceptions=True)
         await asyncio.sleep(0.01)
 
-        check_equal(len(cancel_hits), 1, "on(Event.CANCELLED) should fire exactly once")
+        check_equal(len(cancel_hits), 1, "on(dvt.TaskEvent.CANCELLED) should fire exactly once")
 
 
 async def test_rate_limiting_with_event_and_stat() -> None:
     async with Dovetail(
         rate_limit_per_sec=1,
         rate_limit_burst=1,
-        shutdown_on_exit=False,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
     ) as dvt:
         throttle_hits: list[Any] = []
-        dvt.events.on(Event.RATE_LIMITED, lambda p: throttle_hits.append(p.get("waited")))
+        dvt.events.on(dvt.TaskEvent.RATE_LIMITED, lambda p: throttle_hits.append(p.get("waited")))
 
         results = await asyncio.gather(
             dvt.task.schedule(lambda: "first"),
@@ -1086,18 +1360,23 @@ async def test_rate_limiting_with_event_and_stat() -> None:
             "rate-limited schedule results should preserve order",
         )
         check(
-            dvt.events.stats()["throttled"] >= 1,
+            dvt.events.stats()["rate_limited"] >= 1,
             "throttled stat should increment under rate limiting",
         )
         check(
             len(throttle_hits) >= 1,
-            "on(Event.RATE_LIMITED) listener should fire at least once",
+            "on(dvt.TaskEvent.RATE_LIMITED) listener should fire at least once",
         )
 
 
 async def test_chained_scheduling_via_on_end() -> None:
     # NOTE: step_a/step_b are coroutine *functions* here, not plain callables.
-    async with Dovetail(max_workers=2, shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        max_workers=2,
+        trace=False,
+        trace_logger=_test_logger,
+        trace_prefix="TEST",
+    ) as dvt:
         async def step_a() -> str:
             return "A"
 
@@ -1115,8 +1394,8 @@ async def test_chained_scheduling_via_on_end() -> None:
             chain_hits.append("b_done")
             b_done.set()
 
-        dvt.events.on(Event.DONE, on_a_end, function_target=step_a)
-        dvt.events.on(Event.DONE, on_b_end, function_target=step_b)
+        dvt.events.on(dvt.TaskEvent.DONE, on_a_end, function_target=step_a)
+        dvt.events.on(dvt.TaskEvent.DONE, on_b_end, function_target=step_b)
 
         await dvt.task.schedule(step_a)
         await asyncio.wait_for(b_done.wait(), timeout=1.0)
@@ -1126,11 +1405,15 @@ async def test_chained_scheduling_via_on_end() -> None:
 
 
 async def test_event_listener_requires_callable_callback() -> None:
-    async with Dovetail(shutdown_on_exit=False) as dvt:
+    async with Dovetail(
+        trace=True,
+        trace_logger=_test_logger,
+        trace_prefix="TEST"
+    ) as dvt:
         task = dvt.task.schedule(lambda: "b")
 
         try:
-            dvt.events.on(Event.DONE, task)
+            dvt.events.on(dvt.TaskEvent.DONE, task)
         except TypeError:
             pass
         else:
@@ -1167,7 +1450,7 @@ SYNC_TESTS: list[tuple[str, Callable[[], Any]]] = [
     ("registry: is duplicate registration safe", test_registry_duplicate_registration_is_safe),
     ("registry: unregister", test_registry_unregister_removes_instance),
     ("registry: auto_register=False", test_registry_auto_register_false),
-    ("registry: shutdown_all", test_registry_shutdown_all),
+    ("registry: shutdown", test_registry_shutdown_all),
     ("registry: test that shutdown() removes instance", test_registry_shutdown_removes_instance),
     ("registry: set and test app shutdown hook", test_registry_shutdown_hook_executes),
     ("registry: debug_dovetail_refs", debug_dovetail_refs),
@@ -1202,10 +1485,10 @@ ASYNC_TESTS: list[tuple[str, Callable[[], Any]]] = [
     ("execution_target scoping", test_instance_target_scoping),
     ("events: test callback exception does not break task", test_event_callback_exception_does_not_break_task),
     ("retry exhaustion: retry count + final error event", test_retry_exhaustion_and_error_event),
-    ("on(Event.STARTED) fires once per retry attempt", test_started_fires_once_per_retry_attempt),
+    ("on(dvt.TaskEvent.STARTED) fires once per retry attempt", test_started_fires_once_per_retry_attempt),
     ("cancellation event", test_cancellation_event),
     ("rate limiting: event + throttled stat together", test_rate_limiting_with_event_and_stat),
-    ("chained scheduling via on(Event.DONE)", test_chained_scheduling_via_on_end),
+    ("chained scheduling via on(dvt.TaskEvent.DONE)", test_chained_scheduling_via_on_end),
     ("task as callback raises TypeError", test_event_listener_requires_callable_callback),
 ]
 

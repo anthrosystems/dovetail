@@ -6,22 +6,14 @@ instance. Consumers should instantiate `Dovetail()` where they need
 an executor helper so they control lifetimes and configuration.
 """
 
+import logging
+
 from .dovetail import Dovetail
-from ._events import Event
-from ._register import (
-	register,
-	unregister,
-	list_active,
-	shutdown_all,
-	set_app_shutdown_hook,
-)
+from ._register import registry as DovetailRegistry
+
+logging.getLogger("dovetail").addHandler(logging.NullHandler())
 
 __all__ = [
     "Dovetail",
-	"Event",
-	"register",
-	"unregister",
-	"list_active",
-	"shutdown_all",
-	"set_app_shutdown_hook",
+    "DovetailRegistry"
 ]

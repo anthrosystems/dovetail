@@ -32,7 +32,7 @@ The benchmark measures:
 
 - **Actual** — measured wall-clock time to complete all tasks. The benchmark reports the median across multiple runs to smooth out scheduling noise.
 
-- **Ceiling Hit** — how closely the implementation reached its theoretical completion limit:
+- **Ideal Ceiling** — how closely the implementation reached its theoretical completion limit:
   - `Expected / Actual × 100`
   - `100%` means the implementation reached the predicted runtime.
   - Lower values indicate scheduling, coordination, runtime overhead, or other practical limits.
@@ -40,8 +40,6 @@ The benchmark measures:
 - **Speedup** — improvement compared with the serial baseline:
   - `Serial Time / Actual Time`
   - A value of `10x` means the workload completed ten times faster than running sequentially.
-
-The benchmark also reports the **maximum theoretical speedup**. For example, 20 fully-overlapping tasks have a theoretical maximum speedup of `20x`.
 
 ---
 
@@ -588,9 +586,9 @@ The benchmark uses the median result across `--runs`.
 
 ---
 
-### Ceiling Hit
+### Ideal Ceiling
 
-How close execution reached the theoretical minimum:
+How close execution reached the Theoretical lower bound:
 
 ```
 Expected / Actual × 100
@@ -640,15 +638,14 @@ The clean introduction benchmark.
 Serial execution behaves exactly as expected (`20 × 100ms`). `map_blocking` is bounded by the configured worker count, while `async gather` allows all coroutines to overlap.
 
 ```
-  Mode                           Expected     Actual    Ceiling Hit   Speedup
+  Mode                           Expected     Actual    Ideal Ceiling   Speedup
   --------------------------------------------------------------------------
   Serial                         2000ms      2005ms        99.7%        1.0x
   map_blocking (8 workers)        300ms       304ms        98.5%        6.6x
   async gather                    100ms       171ms        58.3%       11.7x
 
 
-  Theoretical minimum:          100ms
-  Maximum theoretical speedup:   20.0x
+  Theoretical lower bound:          100ms
 
   Achieved speedup ceiling:
     map_blocking: 33.0%
@@ -666,15 +663,14 @@ This demonstrates the predictable scaling behaviour of `map_blocking`.
 The measured result stays close to the threadpool model, showing that Dovetail adds minimal overhead on top of Python's executor scheduling.
 
 ```
-  Mode                           Expected     Actual    Ceiling Hit   Speedup
+  Mode                           Expected     Actual    Ideal Ceiling   Speedup
   --------------------------------------------------------------------------
   Serial                        10000ms     10026ms        99.7%        1.0x
   map_blocking (10 workers)      1000ms      1012ms        98.8%        9.9x
   async gather                    100ms       109ms        91.0%       91.2x
 
 
-  Theoretical minimum:          100ms
-  Maximum theoretical speedup:  100.0x
+  Theoretical lower bound:          100ms
 
   Achieved speedup ceiling:
     map_blocking: 9.9%
@@ -697,15 +693,14 @@ ceil(1000 / 50) = 20 rounds
 The threadpool reaches almost the expected ceiling, while async execution is limited mostly by coroutine scheduling overhead.
 
 ```
-  Mode                            Expected       Actual    Ceiling Hit   Speedup
+  Mode                            Expected       Actual    Ideal Ceiling   Speedup
   --------------------------------------------------------------------------------
   Serial                        100000.0ms   100332.7ms         99.7%        1.0x
   map_blocking (50 workers)       2000.0ms     2037.5ms         98.2%       49.2x
   async gather                     100.0ms      187.5ms         53.3%      535.2x
 
 
-  Theoretical minimum:          100ms
-  Maximum theoretical speedup: 1000.0x
+  Theoretical lower bound:          100ms
 
   Achieved speedup ceiling:
     map_blocking (50 workers): 4.9%
@@ -728,15 +723,14 @@ ceil(10000 / 100) = 100 rounds
 The benchmark shows the trade-off between massive concurrency and scheduling overhead.
 
 ```
-  Mode                             Expected       Actual    Ceiling Hit   Speedup
+  Mode                             Expected       Actual    Ideal Ceiling   Speedup
   ---------------------------------------------------------------------------------
   Serial                         500000.0ms   503821.1ms         99.2%        1.0x
   map_blocking (100 workers)       5000.0ms     5406.0ms         92.5%       93.2x
   async gather                       50.0ms      373.4ms         13.4%     1349.2x
 
 
-  Theoretical minimum:           50ms
-  Maximum theoretical speedup: 10000.0x
+  Theoretical lower bound:           50ms
 
   Achieved speedup ceiling:
     map_blocking (100 workers): 0.9%
@@ -757,15 +751,14 @@ ceil(5000 / 200) = 25 rounds
 ```
 
 ```
-  Mode                             Expected       Actual    Ceiling Hit   Speedup
+  Mode                             Expected       Actual    Ideal Ceiling   Speedup
   ---------------------------------------------------------------------------------
   Serial                         500000.0ms   501670.2ms         99.7%        1.0x
   map_blocking (200 workers)       2500.0ms     2710.5ms         92.2%      185.1x
   async gather                      100.0ms      292.1ms         34.2%     1717.5x
 
 
-  Theoretical minimum:          100ms
-  Maximum theoretical speedup:  5000.0x
+  Theoretical lower bound:          100ms
 
   Achieved speedup ceiling:
     map_blocking (200 workers): 3.7%
@@ -791,22 +784,21 @@ Example:
 ```
 
 ```
-  Mode                             Expected       Actual    Ceiling Hit   Speedup
+  Mode                             Expected       Actual    Ideal Ceiling   Speedup
   ---------------------------------------------------------------------------------
   Serial                         100000.0ms   150919.8ms         66.3%        1.0x
   map_blocking (100 workers)       1000.0ms    16378.9ms          6.1%        9.2x
   async gather                        1.0ms     4704.6ms          0.0%       32.1x
 
 
-  Theoretical minimum:            1ms
-  Maximum theoretical speedup: 100000.0x
+  Theoretical lower bound:            1ms
 
   Achieved speedup ceiling:
     map_blocking (100 workers): 0.0%
     async gather: 0.0%
 ```
 
-At this scale, the theoretical minimum becomes unrealistic because task scheduling overhead dominates the actual work.
+At this scale, the Theoretical lower bound becomes unrealistic because task scheduling overhead dominates the actual work.
 
 ---
 

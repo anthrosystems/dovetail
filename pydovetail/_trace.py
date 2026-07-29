@@ -16,12 +16,19 @@ Design notes:
 
 from __future__ import annotations
 
-import threading
-import logging
+import logging, threading
+
 from typing import Any, Dict, Optional
 
+_logger = logging.getLogger(__name__)
 
-def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message: str) -> None:
+__all__ = [
+    "_trace",
+    "_trace_struct",
+]
+
+
+def _trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message: str) -> None:
     """Emit a single-line debug trace when `enabled` is true.
 
     Parameters
@@ -50,7 +57,7 @@ def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message:
         lg.debug("[%s][thread=%s#%s] %s", display_prefix, current.name, ident, message)
 
 
-def trace_struct(
+def _trace_struct(
     enabled: bool,
     logger: Optional[logging.Logger],
     prefix: str,

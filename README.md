@@ -219,9 +219,9 @@ async with Dovetail() as dvt:
 Manual / library patterns (caller-managed ownership):
 
 ```python
-# Manual creation: by default Dovetail will attempt to shutdown on
-# interpreter exit and on SIGINT/SIGTERM. You can opt out by passing
-# `shutdown_on_exit=False` when constructing the instance.
+# Manual creation: by default Dovetail will not attempt to shutdown on
+# interpreter exit and on SIGINT/SIGTERM. You can opt in by passing
+# `shutdown_on_exit=True` when constructing the instance.
 dvt = Dovetail()  # shutdown_on_exit enabled by default
 try:
   results = dvt.task.map_blocking(fetch, items)

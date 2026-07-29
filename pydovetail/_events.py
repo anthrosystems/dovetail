@@ -7,11 +7,8 @@ or one execution instance target.
 
 from __future__ import annotations
 
-import asyncio
-import itertools
-import logging
-import threading
-import weakref
+import logging, asyncio, threading
+import itertools, weakref
 
 from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 from enum import Enum
@@ -19,10 +16,19 @@ from enum import Enum
 if TYPE_CHECKING:
     from .dovetail import Dovetail
 
-class Event(Enum):
+_logger = logging.getLogger(__name__)
+
+__all__ = [
+    "TaskEvent",
+    "Events",
+]
+
+
+
+class TaskEvent(Enum):
     QUEUED = "queued"
     STARTED = "started"
-    RETRY = "retry"
+    RETRY = "retries"
     RATE_LIMITED = "rate_limited"
     ERROR = "error"
     CANCELLED = "cancelled"
@@ -34,15 +40,16 @@ class Event(Enum):
 class Events:
     def __init__(
         self,
-        dovetail: "weakref.ReferenceType[Dovetail]",
+        dovetail: "Dovetail",
         *,
         trace_enabled: bool = False,
         trace_logger: Optional[logging.Logger] = None,
         trace_prefix: str = "Dovetail",
     ) -> None:
+        
         # Back-reference to the owning Dovetail instance. Used to emit
         # package-level events and consult instance-level configuration.
-        self._dovetail = dovetail
+        self._dovetail = weakref.ref(dovetail)
 
         # Lock protecting listener registration tables. We take a coarse
         # lock here because registration/emission is relatively infrequent
@@ -83,10 +90,11 @@ class Events:
         self._stats: Dict[str, int] = {
             "queued": 0,
             "started": 0,
-            "done": 0,
-            "error": 0,
             "retries": 0,
-            "throttled": 0,
+            "rate_limited": 0,
+            "error": 0,
+            "cancelled": 0,
+            "done": 0,
         }
 
     @property
@@ -102,12 +110,23 @@ class Events:
         return self._trace_enabled
 
     def trace(self, message: str) -> None:
-        """Emit one trace log line when tracing is enabled."""
+        """Emit a single-line debug trace when `enabled` is true.
+        
+        Parameters
+        - enabled: feature flag to avoid constructing messages when tracing is off.
+        - logger: optional logger instance; falls back to `logging.getLogger(prefix)`.
+        - prefix: short textual prefix included in each trace line (e.g. "Dovetail").
+        - message: the human-readable trace message.
+    
+        This function is intentionally minimal: when tracing is disabled it
+        returns immediately, avoiding the cost of formatting complex messages.
+        """
+        
         # Delegate to a single helper so formatting and thread-info are
         # consistent across the package. Import locally to avoid any
         # import-time side-effects and to keep startup fast when tracing is
         # disabled.
-        from ._trace import trace as _trace
+        from ._trace import _trace
 
         _trace(self._trace_enabled, self._trace_logger, self._trace_prefix, message)
 
@@ -120,10 +139,16 @@ class Events:
         elapsed: Optional[float] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Emit a multi-line structured trace record when tracing is enabled."""
+        """Emit a multi-line, structured debug trace record. The multi-line form improves readability when
+        inspecting logs for task lifecycle events (start/stop/retry/timeout).
+    
+        Fields `task`, `function`, `elapsed` and the optional `extra` mapping
+        are appended only when present to keep the output concise.
+        """
+        
         # Structured traces are emitted via the central helper which keeps
         # the output consistent and easy to search in logs.
-        from ._trace import trace_struct as _trace_struct
+        from ._trace import _trace_struct
 
         _trace_struct(
             self._trace_enabled,
@@ -137,12 +162,22 @@ class Events:
             extra=extra,
         )
 
-    def inc_stat(self, key: str, count: int = 1) -> None:
+    def inc_stat(self, key: str | TaskEvent, count: int = 1) -> None:
         """Increment one cumulative stats counter."""
         # Atomic increment for counters. Missing keys are initialised to
         # zero so callers need not pre-create every counter.
-        with self._stats_lock:
-            self._stats[key] = self._stats.get(key, 0) + int(count)
+        if isinstance(key, TaskEvent):
+            key = key.value
+        try:
+            with self._stats_lock:
+                self._stats[key] = self._stats.get(key, 0) + int(count)
+        except Exception:
+            _logger.warning(
+                "Failed to update stats for key %s",
+                str(key),
+            )
+            # Be defensive: stats updating must not break scheduling.
+            pass
 
     def stats(self) -> Dict[str, int]:
         """Return cumulative execution counters for this instance."""
@@ -151,16 +186,16 @@ class Events:
             return dict(self._stats)
 
     @staticmethod
-    def _event_name(event: Event | str) -> str:
-        """Convert an Event enum or string into a canonical event name."""
-        if isinstance(event, Event):
+    def _event_name(event: TaskEvent | str) -> str:
+        """Convert an TaskEvent enum or string into a canonical event name."""
+        if isinstance(event, TaskEvent):
             return event.value
 
         return str(event).strip()
     
     def _register_listener(
         self,
-        event: Event | str,
+        event: TaskEvent | str,
         callback: Callable[[Dict[str, Any]], None],
         *,
         function_target: Optional[Any] = None,
@@ -211,7 +246,7 @@ class Events:
     
     def on(
         self,
-        event: Event,
+        event: TaskEvent,
         callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         *,
         function_target: Optional[Any] = None,
@@ -223,11 +258,11 @@ class Events:
 
         Can be used directly:
 
-            dvt.events.on(Event.DONE, callback)
+            dvt.events.on(dvt.TaskEvent.DONE, callback)
 
         Or as a decorator:
 
-            @dvt.events.on(Event.DONE)
+            @dvt.events.on(dvt.TaskEvent.DONE)
             def callback(event):
                 ...
 
@@ -333,7 +368,7 @@ class Events:
 
     def emit(
         self,
-        event: Event,
+        event: TaskEvent,
         payload: Dict[str, Any],
     ) -> int:
         """Dispatch one emitted event payload to all matching listeners.
