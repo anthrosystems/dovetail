@@ -12,7 +12,7 @@ events, and cumulative status counters.
 from __future__ import annotations
 
 import os, time, logging, asyncio, threading, concurrent.futures
-import itertools, signal, weakref
+import itertools, signal, weakref, math
 
 from typing import Any, Callable, Optional, Dict
 
@@ -28,10 +28,12 @@ class _TokenBucket:
 
     def __init__(self, rate_per_sec: float, burst: Optional[float] = None) -> None:
         rate = float(rate_per_sec)
-        if rate <= 0:
+        if not math.isfinite(rate) or rate <= 0:
             raise ValueError("rate_per_sec must be > 0")
         self._rate = rate
         self._burst = float(burst) if burst is not None else max(1.0, rate)
+        if not math.isfinite(self._burst) or self._burst <= 0:
+            raise ValueError("rate_limit_burst must be finite and > 0")
         self._tokens = self._burst
         self._last = time.monotonic()
         self._lock = threading.Lock()
@@ -293,7 +295,7 @@ class Dovetail:
             if self.events.trace_enabled:
                 self.events.trace(f"Shutdown (wait={wait})")
             try:
-                self._threadpool.shutdown(wait=wait)
+                self._threadpool.shutdown(wait=wait and threading.current_thread() not in self._threadpool._threads)
             except Exception as exc:
                 # Defensive: shutdown should not raise during cleanup calls
                 if self.events.trace_enabled:

@@ -1,258 +1,57 @@
-# Dovetail - Sync / Async wrapper for Python.
+# Dovetail
 
-[![CI](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml)  [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![PyPI version](https://img.shields.io/pypi/v/pydovetail.svg)](https://pypi.org/project/pydovetail/) [![GitHub Release](https://img.shields.io/github/v/release/anthrosystems/dovetail.svg)](https://github.com/anthrosystems/dovetail/releases/latest)
+[![CI](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml/badge.svg)](https://github.com/anthrosystems/dovetail/actions/workflows/ci.yml)
 
-A lightweight helper for bridging sync and async code, built on Asyncio & ThreadPoolExecutor.
+Dovetail (`pydovetail`) bridges synchronous functions and `asyncio` using a
+bounded thread pool. Requires **Python 3.10+**; no runtime dependencies.
 
-## Table of Contents
-- [Features](#features)
-- [Why Dovetail?](#why-dovetail)
-- [Design Goals](#design-goals)
-- [Installing Dovetail](#installing-dovetail)
-- [Quick Start](#quick-start)
-- [API Summary & Guide](docs/api.md)
+```bash
+python -m pip install pydovetail
+```
+
+## Quick start
+
+```python
+import asyncio
+from pydovetail import Dovetail
+
+def blocking_double(value):
+    return value * 2
+
+async def main():
+    with Dovetail(max_workers=8) as dvt:
+        result = await dvt.task.to_thread(blocking_double, 4)
+        results = await dvt.task.map(blocking_double, range(10), max_concurrency=8)
+        print(result, results)
+
+asyncio.run(main())
+```
+
+Use `dvt.task.map_blocking(func, items, max_concurrency=8)` from synchronous
+code, or `dvt.task.run_blocking(coroutine)` to bridge a synchronous caller.
+Never call blocking wrappers from an already-running event loop.
+
+## Capabilities
+
+- `task.to_thread`: await a blocking function in the executor.
+- `task.map`: ordered concurrent mapping, with `max_concurrency` and
+  `return_exceptions` controls.
+- `task.map_blocking`: synchronous mapping wrapper.
+- `task.schedule`: schedule coroutine or callable work.
+- `task.run_blocking`: bridge synchronous callers.
+- Lifecycle events, counters, tracing, rate limiting, retries and timeouts.
+
+Timeouts cannot stop already-running Python threads. Consult the
+[migration and concurrency guide](docs/migration.md) for cancellation semantics
+and downstream migrations.
+
+## Reference and development
+
+- [API reference](docs/api.md)
+- [Concurrency and migration](docs/migration.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Development](#development)
-- [License](#license)
 
-## Features
+Run `python -m pip install -e '.[dev]'` then `python tests/test.py`.
+CI runs Python 3.10–3.14, linting, a benchmark smoke test and package builds.
 
-- Run blocking functions from async applications using the threadpool.
-- Run async functions from synchronous applications.
-- Bounded threadpool execution.
-- Ordered parallel mapping.
-- Built-in retries and exponential backoff.
-- Per-task timeout support.
-- Token-bucket rate limiting.
-- Lifecycle event hooks.
-- Structured tracing.
-- Automatic instance registry and coordinated shutdown.
-- Sync and async context-manager support.
-
-## Why Dovetail?
-
-Asyncio is powerful, but it has a cascading problem: the moment you want to
-`await` something, that function has to become `async`, which means everything
-calling it has to become `async`, and so on until your entire codebase has been
-rewritten around it.
-
-If you're adding parallelism to an existing project, or only want to optimise
-one bottleneck, rewriting the entire call chain is often unnecessary. Dovetail solves this by allowing synchronous applications to use asynchronous execution patterns without forcing an async migration.
-
-> Dovetail is not intended to outperform native asyncio. Native asyncio gives the most direct control and lowest overhead when an application can be written around async/await. Dovetail's advantage is reducing migration cost: it lets existing synchronous applications introduce concurrency incrementally.
-
----
-
-### Before Dovetail
-
-Imagine an existing synchronous application:
-```python
-def process_report(urls):
-    results = []
-
-    for url in urls:
-        results.append(fetch_url(url))
-
-    return summarise(results)
-```
-
-This works, but every request runs sequentially. If 100 requests each take 100ms:
-```
-100 requests × 100ms = ~10 seconds
-```
-
-The obvious asyncio solution is to rewrite everything:
-```python
-async def process_report(urls):
-    tasks = [
-        fetch_url(url)
-        for url in urls
-    ]
-
-    results = await asyncio.gather(*tasks)
-
-    return summarise(results)
-```
-
-But now every caller must also become async:
-```python
-async def application():
-    report = await process_report(urls)
-```
-
-Which means the async boundary spreads:
-```
-application()
-    ↓
-process_report()
-    ↓
-fetch_url()
-    ↓
-database()
-    ↓
-filesystem()
-```
-
-For a large existing codebase, this migration can be expensive.
-
----
-
-### After Dovetail
-
-Dovetail lets you add concurrency only where you need it:
-```python
-from pydovetail import Dovetail
-
-with Dovetail(max_workers=20) as dvt:
-    def process_report(urls):
-        results = dvt.task.map_blocking(fetch_url, urls)
-        return summarise(results)
-```
-
-The rest of the application remains synchronous:
-```python
-def application():
-    report = process_report(urls)
-```
-
-**No async migration. No rewriting the call stack. No changing unrelated code.**
-
-The execution model becomes:
-```
-application()
-    ↓
-process_report()
-    ↓
-Dovetail threadpool
-    ├── fetch_url()
-    ├── fetch_url()
-    ├── fetch_url()
-    └── fetch_url()
-```
-
-The same synchronous interface now benefits from parallel execution.
-
----
-
-## Design Goals
-
-Dovetail prioritises:
-
-- Minimal adoption cost.
-- Incremental concurrency.
-- Safe lifecycle management.
-- Observable execution.
-
-Dovetail intentionally does not replace asyncio. It provides a bridge for
-projects where a full async migration is impractical.
-
----
-
-## Installing Dovetail
-
-### Requirements:
-- Python 3.9+
-- CPython recommended
-- asyncio
-- ThreadPoolExecutor (standard library)
-
-Dovetail has no runtime dependencies outside Python's standard library.
-
-### Install
-```bash
-pip install pydovetail
-```
-
-
-## Quick Start
-
-Preferred usage: create and manage a `Dovetail` instance with a context manager.
-
-Sync (recommended for most users):
-
-```python
-from pydovetail import Dovetail
-
-with Dovetail(max_workers=8) as dvt:
-  # Sync caller -> sync function (blocks)
-  result = dvt.task.run_blocking(fetch_data)
-
-  # Sync caller -> sync function in threadpool (blocks)
-  result = dvt.task.to_thread_blocking(fetch_data, "target.json")
-
-  # Sync caller -> batch map in threadpool (blocks, bounded concurrency)
-  results = dvt.task.map_blocking(fetch_data, ["a.json", "b.json"], max_concurrency=4)
-
-  # Run an async coroutine from sync code
-  value = dvt.task.run_blocking(fetch_data_async())
-
-  # Or pass a callable:
-  value = dvt.task.run_blocking(fetch_data_async)
-```
-
-Async (use `async with` in async applications):
-
-```python
-async with Dovetail() as dvt:
-  # Schedule coroutine objects
-  tasks = [
-      dvt.task.schedule(fetch_async(i))
-      for i in items
-  ]
-
-  results = await asyncio.gather(*tasks)
-```
-
-```python
-  # Schedule async functions directly
-  task = dvt.task.schedule(fetch_async, "example")
-
-  result = await task
-
-  # Schedule synchronous callables from async code.
-  # Execution happens in Dovetail's threadpool.
-  task = dvt.task.schedule(fetch_blocking, "example")
-
-  result = await task
-```
-
-Manual / library patterns (caller-managed ownership):
-
-```python
-# Manual creation: by default Dovetail will not attempt to shutdown on
-# interpreter exit and on SIGINT/SIGTERM. You can opt in by passing
-# `shutdown_on_exit=True` when constructing the instance.
-dvt = Dovetail()  # shutdown_on_exit enabled by default
-try:
-  results = dvt.task.map_blocking(fetch, items)
-finally:
-  # explicit shutdown is still allowed and idempotent
-  dvt.shutdown()
-
-# Library-author pattern (prefer caller-managed instance when possible)
-def process(items, dvt: Optional[Dovetail] = None):
-  if dvt is None:
-    with Dovetail() as _dvt:
-      return _dvt.task.map_blocking(worker, items)
-  return dvt.task.map_blocking(worker, items)
-```
-
----
-
-## Development
-
-Run tests locally:
-
-```bash
-python -m pytest -q
-```
-
-Contributions are welcome, please open an issue or PR.
-
----
-
-## License
-
-Dovetail is released under the MIT License.
-
-See **[LICENSE](LICENSE)** for details.
+MIT licensed; see [LICENSE](LICENSE).

@@ -110,6 +110,7 @@ class Task:
         self.dovetail.events.inc_stat(TaskEvent.QUEUED)
         
         self.dovetail._emit_event(TaskEvent.QUEUED, payload)
+        self.dovetail.events.inc_stat(TaskEvent.STARTED)
         self.dovetail._emit_event(TaskEvent.STARTED, payload)
 
         def _on_done(done_task: asyncio.Task) -> None:
@@ -120,6 +121,7 @@ class Task:
                 "execution_id": execution_id,
             }
             if done_task.cancelled():
+                self.dovetail.events.inc_stat(TaskEvent.CANCELLED)
                 self.dovetail._emit_event(TaskEvent.CANCELLED, done_payload)
                 return
             exc = done_task.exception()
@@ -179,7 +181,7 @@ class Task:
                     extra={"Attempt": attempt},
                 )
                 self.dovetail.events.inc_stat(TaskEvent.STARTED)
-                self.dovetail._emit_event(
+                loop.call_soon_threadsafe(self.dovetail._emit_event,
                     TaskEvent.STARTED,
                     {
                         "method": "to_thread",
@@ -202,7 +204,7 @@ class Task:
                         extra={"Attempt": attempt},
                     )
                     self.dovetail.events.inc_stat(TaskEvent.DONE)
-                    self.dovetail._emit_event(
+                    loop.call_soon_threadsafe(self.dovetail._emit_event,
                         TaskEvent.DONE,
                         {
                             "method": "to_thread",
@@ -228,7 +230,7 @@ class Task:
                     # re-raise so the caller sees the exception.
                     if attempt > retries:
                         self.dovetail.events.inc_stat(TaskEvent.ERROR)
-                        self.dovetail._emit_event(
+                        loop.call_soon_threadsafe(self.dovetail._emit_event,
                             TaskEvent.ERROR,
                             {
                                 "method": "to_thread",
@@ -252,7 +254,7 @@ class Task:
                         function=func_name,
                         extra={"Attempt": attempt, "Sleep": f"{sleep_for:.3f}s", "Error": exc},
                     )
-                    self.dovetail._emit_event(
+                    loop.call_soon_threadsafe(self.dovetail._emit_event,
                         TaskEvent.RETRY,
                         {
                             "method": "to_thread",
@@ -299,6 +301,48 @@ class Task:
         """Sync wrapper around to_thread(...) for callers without an event loop."""
         return self.run_blocking(self.to_thread(func, *args, **kwargs))
 
+    async def map(
+        self,
+        func: Callable[[Any], Any],
+        items: Any,
+        *,
+        max_concurrency: Optional[int] = None,
+        return_exceptions: bool = False,
+    ) -> list[Any]:
+        """Apply a blocking callable concurrently, preserving input order.
+
+        At most ``max_concurrency`` calls are active simultaneously. On the
+        first error (unless ``return_exceptions`` is set), remaining asyncio
+        jobs are cancelled; already-running threads cannot be interrupted.
+        """
+        if max_concurrency is not None and max_concurrency < 1:
+            raise ValueError("max_concurrency must be >= 1")
+        values = list(items)
+        if not values:
+            return []
+        limit = max_concurrency if max_concurrency is not None else self.dovetail._threadpool._max_workers
+        semaphore = asyncio.Semaphore(limit)
+        results: list[Any] = [None] * len(values)
+
+        async def run_one(index: int, value: Any) -> None:
+            async with semaphore:
+                try:
+                    results[index] = await self.to_thread(func, value)
+                except Exception as exc:
+                    if not return_exceptions:
+                        raise
+                    results[index] = exc
+
+        jobs = [asyncio.create_task(run_one(i, value)) for i, value in enumerate(values)]
+        try:
+            await asyncio.gather(*jobs)
+        except BaseException:
+            for job in jobs:
+                job.cancel()
+            await asyncio.gather(*jobs, return_exceptions=True)
+            raise
+        return results
+
     def map_blocking(
         self,
         func: Callable[[Any], Any],
@@ -306,51 +350,12 @@ class Task:
         max_concurrency: Optional[int] = None,
         return_exceptions: bool = False,
     ) -> list[Any]:
-        """Apply func to items concurrently and block for ordered results."""
-        items_list = list(items)
-        if not items_list:
-            return []
-
-        workers = len(items_list) if max_concurrency is None else max(1, int(max_concurrency or 1))
-        func_name = self.dovetail._callable_name(func)
-        self.dovetail.events.trace_struct(
-            method="map_blocking",
-            status="Start",
-            function=func_name,
-            extra={
-                "Items": len(items_list),
-                "Max Concurrency": workers,
-                "Return Exceptions": return_exceptions,
-            },
+        """Synchronous counterpart of :meth:`map`."""
+        return self.run_blocking(
+            self.map, func, items,
+            max_concurrency=max_concurrency,
+            return_exceptions=return_exceptions,
         )
-
-        async def _run_map() -> list[Any]:
-            semaphore = asyncio.Semaphore(workers)
-            results: list[Any] = [None] * len(items_list)
-
-            async def _run_one(index: int, item: Any) -> None:
-                async with semaphore:
-                    try:
-                        results[index] = await self.to_thread(func, item)
-                    except Exception as exc:
-                        if return_exceptions:
-                            results[index] = exc
-                        else:
-                            raise
-
-            await asyncio.gather(
-                *(_run_one(i, item) for i, item in enumerate(items_list)),
-                return_exceptions=False,
-            )
-            self.dovetail.events.trace_struct(
-                method="map_blocking",
-                status="Done",
-                function=func_name,
-                extra={"Items": len(items_list)},
-            )
-            return results
-
-        return self.run_blocking(_run_map)
 
     def run_blocking(self, func_or_coro: Any, *args: Any, **kwargs: Any) -> Any:
         """Run a callable/coroutine synchronously from sync code."""
@@ -445,6 +450,8 @@ class Task:
                 )
                 raise
 
+        if inspect.iscoroutine(func_or_coro):
+            func_or_coro.close()
         raise RuntimeError(
             "dvt.task.run_blocking() cannot be called from a running "
             "event loop. Use await dvt.task.schedule(...) or await "

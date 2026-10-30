@@ -716,3 +716,12 @@ Beyond the built-in `trace=True` flag (which logs Dovetail's own internal lifecy
   ```
 
 Both `trace()` and `trace_struct()` route through the same logger and gating flag as Dovetail's internal traces (`trace_logger`/`trace_prefix` from the constructor), so your custom checkpoints appear interleaved with, and formatted like, the built-in ones — set `trace_logger` to a dedicated logger if you want to filter your application's own log level independently of Dovetail's (see the **[Constructor Reference](#constructor-reference)** example).
+## Async mapping (Python 3.10+)
+
+`await dvt.task.map(func, items, *, max_concurrency=None, return_exceptions=False)`
+executes a synchronous callable in the executor with ordered results. Set
+`max_concurrency` to a positive integer to cap simultaneous executions;
+by default it uses the executor worker count. With `return_exceptions=True`,
+exceptions are returned in result positions instead of being raised.
+`map_blocking` is the synchronous wrapper and must not be called from a
+running event loop. See [migration notes](migration.md) for timeout semantics.
