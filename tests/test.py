@@ -70,18 +70,18 @@ Coverage:
     - inc_stat() accumulates a custom counter alongside the built-ins
 """
 
-import sys
-import time
-import logging
 import asyncio
-import threading
 import gc
-import weakref
 import inspect
+import logging
+import sys
+import threading
+import time
 import traceback
-
+import weakref
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)) # Ensure local package is tested, not PyPI release
@@ -150,7 +150,7 @@ def run_test(name: str, fn: Callable[[], Any]) -> None:
         fn()
         RESULTS.record_pass(name)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Report all test failures
         RESULTS.record_fail(name, exc)
 
         # Save traceback before clearing exception references
@@ -176,7 +176,7 @@ async def run_async_test(name: str, coro_fn: Callable[[], Any]) -> None:
         await coro_fn()
         RESULTS.record_pass(name)
 
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - Report all test failures
         RESULTS.record_fail(name, exc)
 
         tb = exc.__traceback__

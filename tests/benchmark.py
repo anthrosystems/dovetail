@@ -85,21 +85,18 @@ Usage:
   python benchmark.py --observe               # show live events + stats
 """
 
-import sys
 import argparse
 import asyncio
 import logging
 import statistics
+import sys
 import time
-
 from pathlib import Path
-from typing import List
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT)) # Ensure local package is benchmarked, not PyPI release
 
 from pydovetail import Dovetail
-
 
 # Module-level logger used when enabling Dovetail trace output from main()
 logger = logging.getLogger("dovetail.benchmark")
@@ -203,12 +200,12 @@ def print_stats(dvt: Dovetail, mode_name: str) -> None:
 # Benchmark runners
 # ---------------------------------------------------------------------------
 
-def run_serial(n: int, duration: float) -> List[int]:
+def run_serial(n: int, duration: float) -> list[int]:
     """Run jobs one at a time in a plain for-loop. Baseline: ~n X duration."""
     return [sync_io_job(i, duration) for i in range(n)]
 
 
-def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> List[int]:
+def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> list[int]:
     """
     Run jobs in parallel using Dovetail's threadpool.
     map_blocking is the idiomatic Dovetail way to scatter work from sync code.
@@ -245,7 +242,7 @@ def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = 
         dvt.shutdown()
 
 
-def run_async_gather(n: int, duration: float, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> List[int]:
+def run_async_gather(n: int, duration: float, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> list[int]:
     """
     Run jobs concurrently using asyncio.gather via Dovetail's schedule.
     Expected time: ~duration (all coroutines interleave in one event loop).

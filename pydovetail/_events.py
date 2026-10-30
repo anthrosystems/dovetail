@@ -7,11 +7,14 @@ or one execution instance target.
 
 from __future__ import annotations
 
-import logging, asyncio, threading
-import itertools, weakref
-
-from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
+import asyncio
+import itertools
+import logging
+import threading
+import weakref
+from collections.abc import Callable
 from enum import Enum
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .dovetail import Dovetail
@@ -19,8 +22,8 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 __all__ = [
-    "TaskEvent",
     "Events",
+    "TaskEvent",
 ]
 
 
@@ -40,10 +43,10 @@ class TaskEvent(Enum):
 class Events:
     def __init__(
         self,
-        dovetail: "Dovetail",
+        dovetail: Dovetail,
         *,
         trace_enabled: bool = False,
-        trace_logger: Optional[logging.Logger] = None,
+        trace_logger: logging.Logger | None = None,
         trace_prefix: str = "Dovetail",
     ) -> None:
         
@@ -62,8 +65,8 @@ class Events:
 
         # Mapping of event name -> subscription id -> callback. Subscriptions
         # metadata is stored separately to allow efficient matching logic.
-        self._listeners: Dict[str, Dict[str, Callable[[Dict[str, Any]], None]]] = {}
-        self._subscriptions: Dict[str, Dict[str, Any]] = {}
+        self._listeners: dict[str, dict[str, Callable[[dict[str, Any]], None]]] = {}
+        self._subscriptions: dict[str, dict[str, Any]] = {}
         
         # Track decorated listener functions without mutating user functions.
         # Entries disappear automatically when functions are garbage collected.
@@ -87,7 +90,7 @@ class Events:
         # protect these with a dedicated lock so callers can increment
         # counters cheaply without contending on the main registration lock.
         self._stats_lock = threading.Lock()
-        self._stats: Dict[str, int] = {
+        self._stats: dict[str, int] = {
             "queued": 0,
             "started": 0,
             "retries": 0,
@@ -98,7 +101,7 @@ class Events:
         }
 
     @property
-    def dovetail(self) -> "Dovetail":
+    def dovetail(self) -> Dovetail:
         dvt = self._dovetail()
         if dvt is None:
             raise RuntimeError("Dovetail instance has been garbage collected")
@@ -134,10 +137,10 @@ class Events:
         self,
         method: str,
         status: str,
-        task: Optional[Any] = None,
-        function: Optional[str] = None,
-        elapsed: Optional[float] = None,
-        extra: Optional[Dict[str, Any]] = None,
+        task: Any | None = None,
+        function: str | None = None,
+        elapsed: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> None:
         """Emit a multi-line, structured debug trace record. The multi-line form improves readability when
         inspecting logs for task lifecycle events (start/stop/retry/timeout).
@@ -175,11 +178,11 @@ class Events:
             _logger.warning(
                 "Failed to update stats for key %s",
                 str(key),
+                exc_info=True,
             )
             # Be defensive: stats updating must not break scheduling.
-            pass
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> dict[str, int]:
         """Return cumulative execution counters for this instance."""
         # Return a copy to avoid exposing internal mutable state.
         with self._stats_lock:
@@ -196,10 +199,10 @@ class Events:
     def _register_listener(
         self,
         event: TaskEvent | str,
-        callback: Callable[[Dict[str, Any]], None],
+        callback: Callable[[dict[str, Any]], None],
         *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
+        function_target: Any | None = None,
+        execution_target: Any | None = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
     ) -> str:
@@ -247,13 +250,13 @@ class Events:
     def on(
         self,
         event: TaskEvent,
-        callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        callback: Callable[[dict[str, Any]], None] | None = None,
         *,
-        function_target: Optional[Any] = None,
-        execution_target: Optional[Any] = None,
+        function_target: Any | None = None,
+        execution_target: Any | None = None,
         allow_reentry: bool = False,
         max_chain_depth: int = 5,
-    ) -> str | Callable[[Dict[str, Any]], None]:
+    ) -> str | Callable[[dict[str, Any]], None]:
         """Register an event listener.
 
         Can be used directly:
@@ -272,8 +275,8 @@ class Events:
         """
 
         def decorator(
-            func: Callable[[Dict[str, Any]], None]
-        ) -> Callable[[Dict[str, Any]], None]:
+            func: Callable[[dict[str, Any]], None]
+        ) -> Callable[[dict[str, Any]], None]:
             """Register a decorated event listener and return the original function."""
 
             if not callable(func):
@@ -369,7 +372,7 @@ class Events:
     def emit(
         self,
         event: TaskEvent,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
     ) -> int:
         """Dispatch one emitted event payload to all matching listeners.
 
@@ -394,7 +397,7 @@ class Events:
         # should receive this event. We consult subscription metadata for
         # function/instance scoping without holding the lock while invoking
         # callbacks later.
-        matched: list[tuple[str, Callable[[Dict[str, Any]], None]]] = []
+        matched: list[tuple[str, Callable[[dict[str, Any]], None]]] = []
         for sub_id, callback in global_listeners:
             with self._lock:
                 sub = self._subscriptions.get(sub_id)
@@ -435,7 +438,7 @@ class Events:
                 # accidental cross-listener mutation.
                 callback(dict(data))
                 called += 1
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Report all test failures
                 # Trace the listener error but do not allow it to propagate.
                 self.trace(f"events callback error event={event_name}: {exc}")
             finally:
@@ -460,12 +463,12 @@ class Events:
         # methods (e.g. "Class.method") and is more helpful when matching
         # listeners scoped to a function target.
         if hasattr(func, "__qualname__"):
-            return str(getattr(func, "__qualname__"))
+            return str(func.__qualname__)
         if hasattr(func, "__name__"):
-            return str(getattr(func, "__name__"))
+            return str(func.__name__)
         return str(func)
 
-    def _payload_instance_key(self, payload: Dict[str, Any]) -> Optional[str]:
+    def _payload_instance_key(self, payload: dict[str, Any]) -> str | None:
         """Extract the instance key used for instance-target listener matching."""
         execution_id = payload.get("execution_id")
         if execution_id is not None:

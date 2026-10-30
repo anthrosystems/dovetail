@@ -11,13 +11,22 @@ events, and cumulative status counters.
 
 from __future__ import annotations
 
-import os, time, logging, asyncio, threading, concurrent.futures
-import itertools, signal, weakref, math
+import asyncio
+import concurrent.futures
+import itertools
+import logging
+import math
+import os
+import signal
+import threading
+import time
+import weakref
+from typing import Any
 
-from typing import Any, Callable, Optional, Dict
+from typing_extensions import Self
 
+from ._events import Events, TaskEvent
 from ._register import registry
-from ._events import TaskEvent, Events
 from ._task import Task
 
 _logger = logging.getLogger(__name__)
@@ -26,7 +35,7 @@ _logger = logging.getLogger(__name__)
 class _TokenBucket:
     """Thread-safe token bucket for lightweight rate limiting."""
 
-    def __init__(self, rate_per_sec: float, burst: Optional[float] = None) -> None:
+    def __init__(self, rate_per_sec: float, burst: float | None = None) -> None:
         rate = float(rate_per_sec)
         if not math.isfinite(rate) or rate <= 0:
             raise ValueError("rate_per_sec must be > 0")
@@ -81,16 +90,16 @@ class Dovetail:
     
     def __init__(
         self,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
         auto_register: bool = True,
-        max_workers: Optional[int] = None,
-        rate_limit_per_sec: Optional[float] = None,
-        rate_limit_burst: Optional[float] = None,
-        timeout: Optional[float] = None,
+        max_workers: int | None = None,
+        rate_limit_per_sec: float | None = None,
+        rate_limit_burst: float | None = None,
+        timeout: float | None = None,
         retries: int = 0,
         retry_backoff: float = 0.0,
         trace: bool = False,
-        trace_logger: Optional[logging.Logger] = None,
+        trace_logger: logging.Logger | None = None,
         trace_prefix: str = "Dovetail",
         shutdown_on_exit: bool = False,
     ):
@@ -177,8 +186,10 @@ class Dovetail:
                 self._registered_atexit = True
 
             except Exception:
-                _logger.warning("Exited, but failed to shut down")
-                pass
+                _logger.warning(
+                    "Exited, but failed to shut down",
+                    exc_info=True,
+                )
             
             # Register simple wrappers for SIGINT / SIGTERM where available.
             for _sig in (getattr(signal, 'SIGINT', None), getattr(signal, 'SIGTERM', None)):
@@ -190,10 +201,12 @@ class Dovetail:
                     self._orig_signal_handlers[_sig] = prev
                     signal.signal(_sig, self._signal_handler)
                 except Exception:
-                    _logger.warning("Could not register signal wrappers")
+                    _logger.warning(
+                        "Could not register signal wrappers",
+                        exc_info=True,
+                    )
                     # platforms may restrict signal handling (e.g. some windows
                     # environments) — ignore failures and proceed.
-                    pass
         
         # ------------------------------
         # Registry
@@ -217,14 +230,14 @@ class Dovetail:
     def _next_execution_id(self) -> str:
         return f"run-{next(self._execution_counter)}"
 
-    def _emit_event(self, event: str, payload: Dict[str, Any]) -> None:
+    def _emit_event(self, event: str, payload: dict[str, Any]) -> None:
         self.events.emit(event, payload)
 
     async def _acquire_rate_limit(
         self,
         method: str,
-        task: Optional[Any] = None,
-        function: Optional[str] = None,
+        task: Any | None = None,
+        function: str | None = None,
     ) -> None:
         if self._rate_limiter is None:
             return
@@ -253,9 +266,9 @@ class Dovetail:
         # context (useful for bound methods), otherwise fall back to
         # `__name__` or the type name.
         if hasattr(func, "__qualname__"):
-            return str(getattr(func, "__qualname__"))
+            return str(func.__qualname__)
         if hasattr(func, "__name__"):
-            return str(getattr(func, "__name__"))
+            return str(func.__name__)
         return type(func).__name__
 
     @staticmethod
@@ -289,14 +302,16 @@ class Dovetail:
                 if self._finalizer.alive:
                     self._finalizer.detach()
             except Exception:
-                _logger.warning("Failed to detach from finalizer")
-                pass
+                _logger.warning(
+                    "Failed to detach from finalizer",
+                    exc_info=True,
+                )
 
             if self.events.trace_enabled:
                 self.events.trace(f"Shutdown (wait={wait})")
             try:
                 self._threadpool.shutdown(wait=wait and threading.current_thread() not in self._threadpool._threads)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - Report all test failures
                 # Defensive: shutdown should not raise during cleanup calls
                 if self.events.trace_enabled:
                     self.events.trace(f"Shutdown error: {exc}")
@@ -316,8 +331,10 @@ class Dovetail:
                         self._atexit_callback = None
 
                 except Exception:
-                    _logger.warning("Failed to unregister process-level handlers")
-                    pass
+                    _logger.warning(
+                        "Failed to unregister process-level handlers",
+                        exc_info=True,
+                    )
                 
                 # Restore previous signal handlers we replaced during init.
                 try:
@@ -325,11 +342,17 @@ class Dovetail:
                         try:
                             signal.signal(sig, prev)
                         except Exception:
-                            pass
+                            _logger.warning(
+                                "Failed to restore signal handler %s",
+                                sig,
+                                exc_info=True,
+                            ) # 1
                     self._orig_signal_handlers.clear()
                 except Exception:
-                    _logger.warning("Failed to restore previous signal handlers") # 1
-                    pass
+                    _logger.warning(
+                        "Failed to restore previous signal handlers",
+                        exc_info=True,
+                    ) # 1
         finally:
             # Remove this instance from the global registry.
            registry.unregister(self)
@@ -387,14 +410,14 @@ class Dovetail:
             )
     
     # Context manager support (sync + async)
-    def __enter__(self) -> "Dovetail":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         # Synchronous context manager: perform blocking shutdown
         self.shutdown(wait=True)
 
-    async def __aenter__(self) -> "Dovetail":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

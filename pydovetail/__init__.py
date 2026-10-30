@@ -8,8 +8,8 @@ an executor helper so they control lifetimes and configuration.
 
 import logging
 
-from .dovetail import Dovetail
 from ._register import registry as DovetailRegistry
+from .dovetail import Dovetail
 
 logging.getLogger("dovetail").addHandler(logging.NullHandler())
 

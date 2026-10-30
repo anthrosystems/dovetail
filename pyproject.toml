@@ -8,7 +8,9 @@ version = "3.0.0"
 description = "A lightweight helper for bridging sync and async code, built on Asyncio & ThreadPoolExecutor"
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+	"typing_extensions>=4.0",
+]
 authors = [{name = "anthrosystems", email = "peaceolawuyi01@gmail.com"}]
 license = {text = "MIT"}
 
@@ -32,3 +34,6 @@ include = ["pydovetail*"]
 [tool.ruff.lint.per-file-ignores]
 "tests/test.py" = ["E402"]
 "tests/benchmark.py" = ["E402"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"

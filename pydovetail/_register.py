@@ -8,10 +8,10 @@ leaked pools.
 
 from __future__ import annotations
 
-import logging, threading
+import logging
+import threading
 import weakref
-
-from typing import Callable, List, Optional
+from collections.abc import Callable
 
 _logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ class DovetailRegistry:
         self._lock = threading.Lock()
         # Store weakref.ref objects
         self._items: set[weakref.ref] = set()
-        self._app_hook: Optional[Callable[[], None]] = None
+        self._app_hook: Callable[[], None] | None = None
 
     def register(self, dvt) -> None:
         def _on_dead(wr: weakref.ref) -> None:
@@ -44,10 +44,10 @@ class DovetailRegistry:
             _logger.warning(
                 "Failed to add instance %r to the global registry",
                 dvt,
+                exc_info=True,
             )
-            pass
 
-    def list_active(self) -> List:
+    def list_active(self) -> list:
         with self._lock:
             items = []
 
@@ -74,7 +74,7 @@ class DovetailRegistry:
                     id(dvt),
                 )
 
-    def set_app_shutdown_hook(self, fn: Optional[Callable[[], None]]) -> None:
+    def set_app_shutdown_hook(self, fn: Callable[[], None] | None) -> None:
         with self._lock:
             self._app_hook = fn
 
@@ -105,7 +105,7 @@ class DovetailRegistry:
                 _logger.warning(
                     "Failed to remove instance %r from the global registry",
                     dvt,
+                    exc_info=True,
                 )
-                pass
 
 registry = DovetailRegistry()

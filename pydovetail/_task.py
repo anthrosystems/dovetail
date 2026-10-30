@@ -4,10 +4,14 @@ Helpers for scheduling and bridging sync/async call sites.
 
 from __future__ import annotations
 
-import logging, time, asyncio
-import functools, weakref, inspect
-
-from typing import Any, Callable, Optional, TYPE_CHECKING
+import asyncio
+import functools
+import inspect
+import logging
+import time
+import weakref
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .dovetail import Dovetail
@@ -24,7 +28,7 @@ __all__ = [
 class Task:
     def __init__(
         self,
-        dovetail: "Dovetail"
+        dovetail: Dovetail
     ) -> None:
         
         # Back-reference to the owning Dovetail instance. Used to emit
@@ -32,7 +36,7 @@ class Task:
         self._dovetail = weakref.ref(dovetail)
     
     @property
-    def dovetail(self) -> "Dovetail":
+    def dovetail(self) -> Dovetail:
         dvt = self._dovetail()
         if dvt is None:
             raise RuntimeError("Dovetail instance has been garbage collected")
@@ -91,7 +95,7 @@ class Task:
         task: asyncio.Task,
         *,
         method: str,
-        function: Optional[str],
+        function: str | None,
         execution_id: str,
     ) -> None:
         # Emit simple lifecycle events used by consumers interested in
@@ -137,8 +141,8 @@ class Task:
 
     def _resolve_retry_config(
         self,
-        retries: Optional[int] = None,
-        backoff: Optional[float] = None,
+        retries: int | None = None,
+        backoff: float | None = None,
     ) -> tuple[int, float]:
         """Resolve retry count and backoff, falling back to Dovetail defaults."""
         resolved_retries = self.dovetail._default_retries if retries is None else int(retries)
@@ -306,7 +310,7 @@ class Task:
         func: Callable[[Any], Any],
         items: Any,
         *,
-        max_concurrency: Optional[int] = None,
+        max_concurrency: int | None = None,
         return_exceptions: bool = False,
     ) -> list[Any]:
         """Apply a blocking callable concurrently, preserving input order.
@@ -347,7 +351,7 @@ class Task:
         self,
         func: Callable[[Any], Any],
         items: Any,
-        max_concurrency: Optional[int] = None,
+        max_concurrency: int | None = None,
         return_exceptions: bool = False,
     ) -> list[Any]:
         """Synchronous counterpart of :meth:`map`."""
@@ -656,7 +660,7 @@ class Task:
         
     def managed(
         self,
-        func: Optional[Callable[..., Any]] = None,
+        func: Callable[..., Any] | None = None,
     ) -> Callable[..., Any]:
         """Decorate a callable so execution is managed by Dovetail.
 
