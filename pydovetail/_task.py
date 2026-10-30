@@ -275,9 +275,9 @@ class Task:
 
         future = loop.run_in_executor(self.dovetail._threadpool, fn)
         timeout = self.dovetail._timeout
-        if timeout is None or timeout <= 0:
-            return await future
         try:
+            if timeout is None or timeout <= 0:
+                return await future
             return await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError as exc:
             self.dovetail.events.inc_stat(TaskEvent.ERROR)
@@ -300,6 +300,18 @@ class Task:
                 },
             )
             raise
+        finally:
+            # Worker events are posted using call_soon_threadsafe().  The
+            # executor future can become awaitable before those callbacks have
+            # been dispatched, particularly on Python 3.13+.  Queue a barrier
+            # after the worker's callbacks so listeners have observed all
+            # events before to_thread() completes (or raises).
+            #
+            # A timed-out/cancelled worker may continue running; events it
+            # posts *after* this barrier cannot be waited on here.
+            barrier = loop.create_future()
+            loop.call_soon(barrier.set_result, None)
+            await barrier
 
     def to_thread_blocking(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Sync wrapper around to_thread(...) for callers without an event loop."""

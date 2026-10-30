@@ -49,3 +49,31 @@ class AsyncMapTests(unittest.IsolatedAsyncioTestCase):
             await dvt.task.to_thread(lambda: 1)
             await asyncio.sleep(0)
             self.assertIn(loop_thread, seen)
+
+    async def test_worker_events_visible_before_return(self):
+        # A fast worker can finish before call_soon_threadsafe events run.
+        with Dovetail(retries=2, retry_backoff=0) as dvt:
+            events = []
+            dvt.events.on(dvt.TaskEvent.QUEUED, lambda p: events.append("queued"))
+            dvt.events.on(dvt.TaskEvent.STARTED, lambda p: events.append("started"))
+            dvt.events.on(dvt.TaskEvent.DONE, lambda p: events.append("done"))
+            dvt.events.on(dvt.TaskEvent.RETRY, lambda p: events.append("retry"))
+            dvt.events.on(dvt.TaskEvent.ERROR, lambda p: events.append("error"))
+
+            for _ in range(50):
+                events.clear()
+                self.assertEqual(await dvt.task.to_thread(lambda: 42), 42)
+                self.assertEqual(events, ["queued", "started", "done"])
+
+            attempts = 0
+
+            def fail():
+                nonlocal attempts
+                attempts += 1
+                raise ValueError("expected")
+
+            events.clear()
+            with self.assertRaises(ValueError):
+                await dvt.task.to_thread(fail)
+            self.assertEqual(attempts, 3)
+            self.assertEqual(events, ["queued", "started", "retry", "started", "retry", "started", "error"])
