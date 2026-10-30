@@ -4,13 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pydovetail"
-version = "2.1.0"
+version = "3.0.0"
 description = "A lightweight helper for bridging sync and async code, built on Asyncio & ThreadPoolExecutor"
 readme = "README.md"
-requires-python = ">=3.8"
-dependencies = []
+requires-python = ">=3.10"
+dependencies = [
+	"typing_extensions>=4.0",
+]
 authors = [{name = "anthrosystems", email = "peaceolawuyi01@gmail.com"}]
-license = {text = "MIT"}
+license = "MIT"
 
 [project.urls]
 Homepage = "https://github.com/anthrosystems/dovetail"
@@ -18,12 +20,11 @@ Repository = "https://github.com/anthrosystems/dovetail"
 
 [project.optional-dependencies]
 dev = [
-	"pytest>=7.0",
-	"pytest-asyncio",
-	"build",
-	"twine",
-	"ruff",
-	"objgraph",
+	"pytest>=8.0",
+	"pytest-asyncio>=0.24",
+	"build>=1.2",
+	"twine>=5.0",
+	"ruff>=0.8",
 ]
 
 [tool.setuptools.packages.find]
@@ -33,3 +34,6 @@ include = ["pydovetail*"]
 [tool.ruff.lint.per-file-ignores]
 "tests/test.py" = ["E402"]
 "tests/benchmark.py" = ["E402"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"

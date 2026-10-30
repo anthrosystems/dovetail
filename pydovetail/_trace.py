@@ -16,12 +16,19 @@ Design notes:
 
 from __future__ import annotations
 
-import threading
 import logging
-from typing import Any, Dict, Optional
+import threading
+from typing import Any
+
+_logger = logging.getLogger(__name__)
+
+__all__ = [
+    "_trace",
+    "_trace_struct",
+]
 
 
-def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message: str) -> None:
+def _trace(enabled: bool, logger: logging.Logger | None, prefix: str, message: str) -> None:
     """Emit a single-line debug trace when `enabled` is true.
 
     Parameters
@@ -50,16 +57,16 @@ def trace(enabled: bool, logger: Optional[logging.Logger], prefix: str, message:
         lg.debug("[%s][thread=%s#%s] %s", display_prefix, current.name, ident, message)
 
 
-def trace_struct(
+def _trace_struct(
     enabled: bool,
-    logger: Optional[logging.Logger],
+    logger: logging.Logger | None,
     prefix: str,
     method: str,
     status: str,
-    task: Optional[Any] = None,
-    function: Optional[str] = None,
-    elapsed: Optional[float] = None,
-    extra: Optional[Dict[str, Any]] = None,
+    task: Any | None = None,
+    function: str | None = None,
+    elapsed: float | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> None:
     """Emit a multi-line, structured debug trace record. The multi-line form improves readability when
     inspecting logs for task lifecycle events (start/stop/retry/timeout).

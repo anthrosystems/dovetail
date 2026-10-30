@@ -8,21 +8,24 @@ leaked pools.
 
 from __future__ import annotations
 
-import threading
 import logging
+import threading
 import weakref
+from collections.abc import Callable
 
-from typing import Callable, List, Optional
+_logger = logging.getLogger(__name__)
 
-_log = logging.getLogger(__name__)
+__all__ = [
+    "registry",
+]
 
 
-class _Registry:
+class DovetailRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         # Store weakref.ref objects
         self._items: set[weakref.ref] = set()
-        self._app_hook: Optional[Callable[[], None]] = None
+        self._app_hook: Callable[[], None] | None = None
 
     def register(self, dvt) -> None:
         def _on_dead(wr: weakref.ref) -> None:
@@ -30,23 +33,21 @@ class _Registry:
                 self._items.discard(wr)
 
         # Avoid duplicate registration for the same object
-        with self._lock:
-            for existing in list(self._items):
-                try:
+        try:
+            with self._lock:
+                for existing in list(self._items):
                     if existing() is dvt:
                         return
-                except Exception:
-                    pass
-            wr = weakref.ref(dvt, _on_dead)
-            self._items.add(wr)
+                wr = weakref.ref(dvt, _on_dead)
+                self._items.add(wr)
+        except Exception:
+            _logger.warning(
+                "Failed to add instance %r to the global registry",
+                dvt,
+                exc_info=True,
+            )
 
-    def unregister(self, dvt) -> None:
-        with self._lock:
-            for wr in list(self._items):
-                if wr() is dvt:
-                    self._items.discard(wr)
-
-    def list_active(self) -> List:
+    def list_active(self) -> list:
         with self._lock:
             items = []
 
@@ -57,18 +58,23 @@ class _Registry:
 
             return items
 
-    def shutdown_all(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True) -> None:
+        """Shut down all registered Dovetail instances.
+
+        Each active instance is asked to perform its own shutdown cleanup,
+        including releasing resources and unregistering itself from the registry.
+        """
         # Best-effort shutdown of all active Dovetail instances.
         for dvt in self.list_active():
             try:
                 dvt.shutdown(wait=wait)
             except Exception:
-                _log.exception(
-                    "Error shutting down Dovetail instance %r",
-                    dvt,
+                _logger.exception(
+                    "Error shutting down Dovetail instance id=%s",
+                    id(dvt),
                 )
 
-    def set_app_shutdown_hook(self, fn: Optional[Callable[[], None]]) -> None:
+    def set_app_shutdown_hook(self, fn: Callable[[], None] | None) -> None:
         with self._lock:
             self._app_hook = fn
 
@@ -84,31 +90,22 @@ class _Registry:
                     hook()
                     return
                 except Exception:
-                    _log.exception("App shutdown hook raised an exception")
+                    _logger.exception("App shutdown hook raised an exception")
         finally:
             # fallback: shutdown all
-            self.shutdown_all()
+            self.shutdown()
+    
+    def unregister(self, dvt) -> None:
+            try:
+                with self._lock:
+                    for wr in list(self._items):
+                        if wr() is dvt:
+                            self._items.discard(wr)
+            except Exception:
+                _logger.warning(
+                    "Failed to remove instance %r from the global registry",
+                    dvt,
+                    exc_info=True,
+                )
 
-
-# Global registry used by the dovetail package.
-global_registry = _Registry()
-
-
-def register(dvt) -> None:
-    global_registry.register(dvt)
-
-
-def unregister(dvt) -> None:
-    global_registry.unregister(dvt)
-
-
-def list_active() -> List:
-    return global_registry.list_active()
-
-
-def shutdown_all(wait: bool = True) -> None:
-    return global_registry.shutdown_all(wait=wait)
-
-
-def set_app_shutdown_hook(fn: Optional[Callable[[], None]]) -> None:
-    global_registry.set_app_shutdown_hook(fn)
+registry = DovetailRegistry()

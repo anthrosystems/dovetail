@@ -11,36 +11,49 @@ events, and cumulative status counters.
 
 from __future__ import annotations
 
-import os, time, logging, itertools, signal
-import asyncio, threading, concurrent.futures
+import asyncio
+import concurrent.futures
+import itertools
+import logging
+import math
+import os
+import signal
+import threading
+import time
 import weakref
+from typing import Any
 
-from typing import Any, Callable, Optional, Dict
+from typing_extensions import Self
 
-from ._events import Event, Events
+from ._events import Events, TaskEvent
+from ._register import registry
 from ._task import Task
+
+_logger = logging.getLogger(__name__)
 
 
 class _TokenBucket:
     """Thread-safe token bucket for lightweight rate limiting."""
 
-    def __init__(self, rate_per_sec: float, burst: Optional[float] = None) -> None:
+    def __init__(self, rate_per_sec: float, burst: float | None = None) -> None:
         rate = float(rate_per_sec)
-        if rate <= 0:
+        if not math.isfinite(rate) or rate <= 0:
             raise ValueError("rate_per_sec must be > 0")
         self._rate = rate
         self._burst = float(burst) if burst is not None else max(1.0, rate)
+        if not math.isfinite(self._burst) or self._burst <= 0:
+            raise ValueError("rate_limit_burst must be finite and > 0")
         self._tokens = self._burst
         self._last = time.monotonic()
         self._lock = threading.Lock()
-
+    
     def _refill_locked(self, now: float) -> None:
         elapsed = max(0.0, now - self._last)
         if elapsed > 0:
             self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
             self._last = now
 
-    def reserve(self, tokens: float = 1.0) -> float:
+    def _reserve(self, tokens: float = 1.0) -> float:
         """Reserve tokens and return required wait time in seconds."""
         # Atomically reserve tokens. If sufficient tokens are available this
         # returns 0.0 (no wait). When the bucket is exhausted we return the
@@ -54,10 +67,10 @@ class _TokenBucket:
                 return 0.0
             return (-self._tokens) / self._rate
 
-    async def acquire_async(self, tokens: float = 1.0) -> float:
+    async def _acquire_async(self, tokens: float = 1.0) -> float:
         # Async-friendly wait helper that uses `reserve` and then sleeps for
         # the required duration if the bucket is currently exhausted.
-        wait_for = self.reserve(tokens=tokens)
+        wait_for = self._reserve(tokens=tokens)
         if wait_for > 0:
             await asyncio.sleep(wait_for)
         return wait_for
@@ -65,7 +78,7 @@ class _TokenBucket:
 
 class Dovetail:
     """Run sync and async workloads through one helper.
-
+    
     The `task` helper exposes:
     - `to_thread`: run blocking callables from async code.
     - `schedule`: schedule coroutines or callables.
@@ -74,57 +87,82 @@ class Dovetail:
     Optional defaults (timeout/retries/rate limit) and events provide
     concise observability via `events.stats()`.
     """
-
+    
     def __init__(
         self,
-        loop: Optional[asyncio.AbstractEventLoop] = None,
-        max_workers: Optional[int] = None,
-        trace: bool = False,
-        trace_logger: Optional[logging.Logger] = None,
-        trace_prefix: str = "Dovetail",
-        rate_limit_per_sec: Optional[float] = None,
-        rate_limit_burst: Optional[float] = None,
-        timeout: Optional[float] = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+        auto_register: bool = True,
+        max_workers: int | None = None,
+        rate_limit_per_sec: float | None = None,
+        rate_limit_burst: float | None = None,
+        timeout: float | None = None,
         retries: int = 0,
         retry_backoff: float = 0.0,
+        trace: bool = False,
+        trace_logger: logging.Logger | None = None,
+        trace_prefix: str = "Dovetail",
         shutdown_on_exit: bool = False,
-        auto_register: bool = True,
     ):
+        # ------------------------------
+        # Loop
+        # ------------------------------
         # An optional event loop to associate with this helper. When None,
         # the currently running loop (at call time) will be used.
         self._loop = loop
 
+        # ------------------------------
+        # Max Workers
+        # ------------------------------
         # ThreadPoolExecutor used for running blocking sync functions.
         self._threadpool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-
-        trace_env = str(os.getenv("DOVETAIL_TRACE", "")).strip().lower()
-        trace_enabled = bool(trace) or trace_env in ("1", "true", "yes", "on")
-        self._trace_counter = itertools.count(1)
-        self._execution_counter = itertools.count(1)
-        self._default_timeout = float(timeout) if timeout is not None else None
-        self._default_retries = max(0, int(retries or 0))
-        self._default_retry_backoff = max(0.0, float(retry_backoff or 0.0))
+        
+        # ------------------------------
+        # Rate Limiting
+        # ------------------------------
         self._rate_limiter = None
         if rate_limit_per_sec is not None:
             self._rate_limiter = _TokenBucket(rate_per_sec=float(rate_limit_per_sec), burst=rate_limit_burst)
+        
+        # ------------------------------
+        # Retries
+        # ------------------------------
+        self._default_retries = max(0, int(retries or 0))
+        self._default_retry_backoff = max(0.0, float(retry_backoff or 0.0))
 
+        # ------------------------------
+        # Timeouts
+        # ------------------------------
+        self._timeout = float(timeout) if timeout is not None else None
+
+        # ------------------------------
+        # Tracing
+        # ------------------------------
+        trace_enabled = bool(trace)
+        self._trace_counter = itertools.count(1)
+        self._execution_counter = itertools.count(1)
+        
+        # ------------------------------
+        # Helpers
+        # ------------------------------
         # Expose helpers bound to this Dovetail instance.
-        self.events = Events(
-            weakref.ref(self),
+        self.task = Task(self) # Task Helper
+        self.TaskEvent = TaskEvent # Task Events Helper
+        self.events = Events( # Events Helper
+            self,
             trace_enabled=trace_enabled,
             trace_logger=trace_logger,
             trace_prefix=trace_prefix,
         )
-
-        self.task = Task(self)
         
+        # ------------------------------
+        # Shutdowns
+        # ------------------------------
         # Shutdown tracking to make shutdown() idempotent and safe
         self._shutdown = False
         self._shutdown_lock = threading.Lock()
         self._finalizer = weakref.finalize(
             self,
             Dovetail._finalize_warning,
-            trace_logger,
         )
         
         # Optional automatic shutdown on process exit / signals. When enabled
@@ -148,7 +186,10 @@ class Dovetail:
                 self._registered_atexit = True
 
             except Exception:
-                pass
+                _logger.warning(
+                    "Exited, but failed to shut down",
+                    exc_info=True,
+                )
             
             # Register simple wrappers for SIGINT / SIGTERM where available.
             for _sig in (getattr(signal, 'SIGINT', None), getattr(signal, 'SIGTERM', None)):
@@ -160,36 +201,49 @@ class Dovetail:
                     self._orig_signal_handlers[_sig] = prev
                     signal.signal(_sig, self._signal_handler)
                 except Exception:
+                    _logger.warning(
+                        "Could not register signal wrappers",
+                        exc_info=True,
+                    )
                     # platforms may restrict signal handling (e.g. some windows
                     # environments) — ignore failures and proceed.
-                    pass
         
+        # ------------------------------
+        # Registry
+        # ------------------------------        
         # Optional auto-registration with package-level registry. Import
         # lazily to avoid circular imports when the package is imported.
         if auto_register:
-            from ._register import register as _dovetail_register
-            _dovetail_register(self)
-
+            # Add this instance to the global registry.
+            registry.register(self)
+    
+    ###############################################################################################
+    
+    @property
+    def is_shutdown(self) -> bool:
+        """Whether this Dovetail instance has been shut down."""
+        return self._shutdown
+    
     def _next_trace_id(self) -> int:
         return next(self._trace_counter)
 
     def _next_execution_id(self) -> str:
         return f"run-{next(self._execution_counter)}"
 
-    def _emit_event(self, event: str, payload: Dict[str, Any]) -> None:
+    def _emit_event(self, event: str, payload: dict[str, Any]) -> None:
         self.events.emit(event, payload)
 
     async def _acquire_rate_limit(
         self,
         method: str,
-        task: Optional[Any] = None,
-        function: Optional[str] = None,
+        task: Any | None = None,
+        function: str | None = None,
     ) -> None:
         if self._rate_limiter is None:
             return
-        waited = await self._rate_limiter.acquire_async(tokens=1.0)
+        waited = await self._rate_limiter._acquire_async(tokens=1.0)
         if waited > 0:
-            self.events.inc_stat("throttled")
+            self.events.inc_stat(TaskEvent.RATE_LIMITED)
             payload = {
                 "method": method,
                 "task": task,
@@ -203,7 +257,7 @@ class Dovetail:
                 function=function,
                 elapsed=waited,
             )
-            self._emit_event(Event.RATE_LIMITED, payload)
+            self._emit_event(TaskEvent.RATE_LIMITED, payload)
 
     @staticmethod
     def _callable_name(func: Any) -> str:
@@ -212,17 +266,16 @@ class Dovetail:
         # context (useful for bound methods), otherwise fall back to
         # `__name__` or the type name.
         if hasattr(func, "__qualname__"):
-            return str(getattr(func, "__qualname__"))
+            return str(func.__qualname__)
         if hasattr(func, "__name__"):
-            return str(getattr(func, "__name__"))
+            return str(func.__name__)
         return type(func).__name__
 
     @staticmethod
-    def _finalize_warning(logger):
-        if logger:
-            logger.warning(
-                "Dovetail instance was garbage collected without shutdown()"
-            )
+    def _finalize_warning():
+        _logger.warning(
+            "Dovetail instance was garbage collected without shutdown()"
+        )
     
     @staticmethod
     def _atexit_shutdown(ref):
@@ -231,7 +284,11 @@ class Dovetail:
             dvt.shutdown()
         
     def shutdown(self, wait: bool = True) -> None:
-        """Shut down the internal threadpool executor."""
+        """Release resources owned by this Dovetail instance.
+
+        This shuts down the internal executor, removes the instance from the
+        global registry, and performs any configured cleanup.
+        """
         try:
             # Make shutdown idempotent and thread-safe.
             with self._shutdown_lock:
@@ -245,16 +302,20 @@ class Dovetail:
                 if self._finalizer.alive:
                     self._finalizer.detach()
             except Exception:
-                pass
+                _logger.warning(
+                    "Failed to detach from finalizer",
+                    exc_info=True,
+                )
 
             if self.events.trace_enabled:
                 self.events.trace(f"Shutdown (wait={wait})")
             try:
-                self._threadpool.shutdown(wait=wait)
-            except Exception as exc:
+                self._threadpool.shutdown(wait=wait and threading.current_thread() not in self._threadpool._threads)
+            except Exception as exc:  # noqa: BLE001 - Report all test failures
                 # Defensive: shutdown should not raise during cleanup calls
                 if self.events.trace_enabled:
                     self.events.trace(f"Shutdown error: {exc}")
+            
             # If we registered process-level handlers for shutdown, unregister
             # them now so an explicit call to `shutdown()` undoes our modifications
             # and avoids double-invocation or surprising behavior for the caller.
@@ -270,7 +331,10 @@ class Dovetail:
                         self._atexit_callback = None
 
                 except Exception:
-                    pass
+                    _logger.warning(
+                        "Failed to unregister process-level handlers",
+                        exc_info=True,
+                    )
                 
                 # Restore previous signal handlers we replaced during init.
                 try:
@@ -278,17 +342,21 @@ class Dovetail:
                         try:
                             signal.signal(sig, prev)
                         except Exception:
-                            pass
+                            _logger.warning(
+                                "Failed to restore signal handler %s",
+                                sig,
+                                exc_info=True,
+                            ) # 1
                     self._orig_signal_handlers.clear()
                 except Exception:
-                    pass
+                    _logger.warning(
+                        "Failed to restore previous signal handlers",
+                        exc_info=True,
+                    ) # 1
         finally:
             # Remove this instance from the global registry.
-            try:
-                from ._register import unregister as _dovetail_unregister
-                _dovetail_unregister(self)
-            except Exception:
-                pass
+           registry.unregister(self)
+            
 
     def _signal_handler(self, signum: int, frame) -> None:
         # Best-effort: ensure we shutdown resources, then delegate to the
@@ -298,35 +366,58 @@ class Dovetail:
         try:
             self.shutdown(wait=True)
         except Exception:
-            pass
+            _logger.exception(
+                "Failed to shut down during signal handling (signal=%s)",
+                signum,
+            )
 
         prev = self._orig_signal_handlers.get(signum)
+
         try:
             if prev in (signal.SIG_IGN, signal.SIG_DFL):
-                # restore default and re-raise the signal
-                signal.signal(signum, prev)
+                # Restore default and re-raise the signal.
+                try:
+                    signal.signal(signum, prev)
+                except Exception:
+                    _logger.exception(
+                        "Failed to restore signal handler (signal=%s)",
+                        signum,
+                    )
+
                 try:
                     os.kill(os.getpid(), signum)
                 except Exception:
+                    _logger.exception(
+                        "Failed to re-raise signal (signal=%s)",
+                        signum,
+                    )
                     raise SystemExit
+
             elif callable(prev):
                 try:
                     prev(signum, frame)
                 except Exception:
-                    pass
+                    _logger.exception(
+                        "Previous signal handler failed (signal=%s)",
+                        signum,
+                    )
+
         except Exception:
-            # give up silently — we've already attempted shutdown
-            pass
+            # Give up silently — we've already attempted shutdown
+            _logger.exception(
+                "Unexpected error while handling signal (signal=%s)",
+                signum,
+            )
     
     # Context manager support (sync + async)
-    def __enter__(self) -> "Dovetail":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         # Synchronous context manager: perform blocking shutdown
         self.shutdown(wait=True)
 
-    async def __aenter__(self) -> "Dovetail":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -337,8 +428,3 @@ class Dovetail:
         except RuntimeError:
             # No running loop; fallback to direct call
             self.shutdown(wait=True)
-    
-    @property
-    def is_shutdown(self) -> bool:
-        """Whether this Dovetail instance has been shut down."""
-        return self._shutdown
