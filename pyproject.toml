@@ -12,7 +12,7 @@ dependencies = [
 	"typing_extensions>=4.0",
 ]
 authors = [{name = "anthrosystems", email = "peaceolawuyi01@gmail.com"}]
-license = {text = "MIT"}
+license = "MIT"
 
 [project.urls]
 Homepage = "https://github.com/anthrosystems/dovetail"
