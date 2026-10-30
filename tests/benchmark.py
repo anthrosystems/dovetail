@@ -417,7 +417,6 @@ def main():
     trace = args.trace
 
     # Configure module-level logger for trace output if requested
-    global logger
     if trace:
         # avoid adding duplicate handlers on repeated runs
         if not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):

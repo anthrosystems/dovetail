@@ -83,7 +83,7 @@ class Task:
                         task=task_name,
                         extra={"Label": label, "Error": exc},
                     )
-            except Exception as callback_error:
+            except Exception as callback_error:  # noqa: BLE001 - Isolate task callback failures
                 # Trace any error raised by the done-callback itself; do not
                 # let it propagate and interfere with the task machinery.
                 self.dovetail.events.trace(f"schedule trace-callback error task={task_name}: {callback_error}")

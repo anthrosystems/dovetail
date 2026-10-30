@@ -543,7 +543,7 @@ def test_registry_shutdown_removes_instance() -> None:
 
 
 def test_registry_shutdown_hook_executes() -> None:
-    dvt = Dovetail(
+    Dovetail(
         trace=False,
         trace_logger=_test_logger,
         trace_prefix="TEST",
@@ -780,8 +780,6 @@ def test_events_off_removes_subscription():
         trace_logger=_test_logger,
         trace_prefix="TEST",
     )
-    
-    dvt.TaskEvent.DONE
     
     calls = []
 
