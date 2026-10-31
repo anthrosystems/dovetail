@@ -2,11 +2,13 @@
 benchmark.py — Dovetail performance demonstration
 ==================================================
 
-Compares three execution modes for a batch of I/O-bound tasks:
+Compares five execution modes for a batch of I/O-bound tasks:
 
-  1. Serial          — plain for-loop, one task at a time
-  2. map_blocking    — Dovetail's bounded threadpool (sync caller)
-  3. async gather    — asyncio.gather, fully concurrent (async caller)
+  1. Serial                 — plain for-loop, one task at a time
+  2. Native ThreadPoolExecutor — standard-library bounded threadpool
+  3. Dovetail map_blocking  — Dovetail's bounded threadpool
+  4. Native asyncio.gather  — fully concurrent coroutines without Dovetail
+  5. Dovetail async gather  — Dovetail-scheduled coroutines with gather
 
 Each "task" simulates real I/O work by sleeping for TASK_DURATION seconds.
 This is representative because:
@@ -20,10 +22,10 @@ The expected speedup for N tasks each taking T seconds:
   Serial:
       ~N X T
 
-  map_blocking:
+  Both threadpool modes:
       ~ceil(N / workers) X T
 
-  async gather:
+  Both async gather modes:
       ~T (all tasks overlap)
 
 These are theoretical limits. Real runtimes include scheduling,
@@ -38,10 +40,10 @@ Reading the results table:
                   Serial:
                       tasks X duration
 
-                  map_blocking:
+                  Both threadpool modes:
                       ceil(tasks / workers) X duration
 
-                  async gather:
+                  Both async gather modes:
                       duration (all tasks overlap)
 
 
@@ -87,6 +89,7 @@ Usage:
 
 import argparse
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import statistics
 import sys
@@ -205,6 +208,20 @@ def run_serial(n: int, duration: float) -> list[int]:
     return [sync_io_job(i, duration) for i in range(n)]
 
 
+def run_native_threadpool(n: int, duration: float, max_workers: int) -> list[int]:
+    """Standard-library threadpool baseline with the same worker limit."""
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return list(executor.map(lambda i: sync_io_job(i, duration), range(n)))
+
+
+def run_native_async_gather(n: int, duration: float) -> list[int]:
+    """Pure asyncio baseline using the same coroutine workload."""
+    async def _run():
+        return list(await asyncio.gather(*(async_io_job(i, duration) for i in range(n))))
+
+    return asyncio.run(_run())
+
+
 def run_map_blocking(n: int, duration: float, max_workers: int, observe: bool = False, context_manager: bool = True, trace: bool = False, trace_prefix: str | None = None) -> list[int]:
     """
     Run jobs in parallel using Dovetail's threadpool.
@@ -255,7 +272,6 @@ def run_async_gather(n: int, duration: float, observe: bool = False, context_man
                 print()
             tasks = [dvt.task.schedule(async_io_job(i, duration)) for i in range(n)]
             result = list(await asyncio.gather(*tasks))
-            await asyncio.sleep(0.05)
             if observe:
                 print_stats(dvt, "async gather")
             return result
@@ -269,7 +285,6 @@ def run_async_gather(n: int, duration: float, observe: bool = False, context_man
                 print()
             tasks = [dvt.task.schedule(async_io_job(i, duration)) for i in range(n)]
             result = list(await asyncio.gather(*tasks))
-            await asyncio.sleep(0.05)
             if observe:
                 print_stats(dvt, "async gather")
             return result
@@ -310,19 +325,20 @@ def print_results(n: int, duration: float, results: dict) -> None:
 
     expected = {
         "Serial": n * duration,
-        "async gather": duration,
+        "Native asyncio.gather": duration,
+        "Dovetail async gather": duration,
     }
 
     n_workers = next(
-        (int(m.split("(")[1].split(" ")[0]) for m in results if "workers" in m),
+        (int(m.split("(")[1].split(" ")[0]) for m in results
+         if m.startswith("Dovetail map_blocking (")),
         None,
     )
-
     if n_workers:
         rounds = math.ceil(n / n_workers)
-        expected[f"map_blocking ({n_workers} workers)"] = rounds * duration
-    else:
-        expected["map_blocking"] = duration
+        for mode in results:
+            if mode.startswith(("Native ThreadPoolExecutor (", "Dovetail map_blocking (")):
+                expected[mode] = rounds * duration
 
     col_w = max(len(mode) for mode in results) + 2
     width = col_w + 70
@@ -333,14 +349,14 @@ def print_results(n: int, duration: float, results: dict) -> None:
     print("Columns:")
     print("     Expected       — theoretical completion time for this execution model")
     print("     Actual         — measured wall-clock time (median across runs)")
-    print("     Ideal Ceiling    — how close the run got to its theoretical limit")
+    print("     Ideal Ceiling  — how close the run got to its theoretical limit")
     print("     Speedup        — improvement compared to serial execution")
     print()
 
     if n_workers:
         rounds = math.ceil(n / n_workers)
         print(
-            f"    map_blocking uses ceil({n}/{n_workers}) = {rounds} rounds "
+            f"    Threadpool modes use ceil({n}/{n_workers}) = {rounds} rounds "
             f"x {duration*1000:.0f}ms ≈ {rounds * duration * 1000:.0f}ms"
         )
 
@@ -377,7 +393,7 @@ def print_results(n: int, duration: float, results: dict) -> None:
     print(f"  Theoretical lower bound:          {duration*1000:.0f}ms")
     print()
 
-    print("  Achieved speedup ceiling:")
+    print("  Fraction of idealised maximum speedup:")
     for mode, actual in results.items():
         if mode == "Serial":
             continue
@@ -406,6 +422,8 @@ def main():
     parser.add_argument("--observe",  action="store_true",                  help="Print live events and stats")
     parser.add_argument("--trace", action="store_true", help="Enable Dovetail internal tracing (debug output)")
     args = parser.parse_args()
+    if args.tasks < 1 or args.workers < 1 or args.runs < 1 or args.duration <= 0:
+        parser.error("--tasks, --workers, --runs and --duration must be positive")
 
     n         = args.tasks
     duration  = args.duration
@@ -435,19 +453,24 @@ def main():
         # Only show events on the final run (median run), not every repetition.
         # We do this by running normally for (runs - 1) and then one observed run.
 
-    print(f"\nWarming up... ({runs} run(s) per mode)")
+    print(f"\nBenchmarking... ({runs} run(s) per mode; median reported)")
 
     results = {}
 
-    print("  [1/3] Serial...", end=" ", flush=True)
+    print("  [1/5] Serial...", end=" ", flush=True)
     results["Serial"] = median_time(run_serial, runs, n, duration)
     print(f"{results['Serial']*1000:.1f}ms")
 
-    print("  [2/3] map_blocking (threadpool)...", end=" ", flush=True)
+    print("  [2/5] Native ThreadPoolExecutor...", end=" ", flush=True)
+    native_pool_label = f"Native ThreadPoolExecutor ({workers} workers)"
+    results[native_pool_label] = median_time(run_native_threadpool, runs, n, duration, workers)
+    print(f"{results[native_pool_label]*1000:.1f}ms")
+
+    print("  [3/5] Dovetail map_blocking (threadpool)...", end=" ", flush=True)
     if compare:
         # Run both variants (no-context and context) and record separately
-        label_no = f"map_blocking ({workers} workers) [no-context]"
-        label_ctx = f"map_blocking ({workers} workers) [context]"
+        label_no = f"Dovetail map_blocking ({workers} workers) [no-context]"
+        label_ctx = f"Dovetail map_blocking ({workers} workers) [context]"
         if observe and runs > 1:
             silent_no = [timed(run_map_blocking, n, duration, workers, context_manager=False, trace=trace)[1] for _ in range(runs - 1)]
             print()
@@ -467,14 +490,14 @@ def main():
             silent = [timed(run_map_blocking, n, duration, workers, context_manager=context_manager, trace=trace)[1] for _ in range(runs - 1)]
             print()  # newline before live events
             _, observed = timed(run_map_blocking, n, duration, workers, context_manager=context_manager, observe=True, trace=trace)
-            results[f"map_blocking ({workers} workers)"] = statistics.median(silent + [observed])
+            results[f"Dovetail map_blocking ({workers} workers)"] = statistics.median(silent + [observed])
         else:
-            results[f"map_blocking ({workers} workers)"] = median_time(
+            results[f"Dovetail map_blocking ({workers} workers)"] = median_time(
                 run_map_blocking, runs, n, duration, workers, context_manager=context_manager, observe=observe, trace=trace
             )
     if compare:
-        label_no = f"map_blocking ({workers} workers) [no-context]"
-        label_ctx = f"map_blocking ({workers} workers) [context]"
+        label_no = f"Dovetail map_blocking ({workers} workers) [no-context]"
+        label_ctx = f"Dovetail map_blocking ({workers} workers) [context]"
         no_ms = results.get(label_no)
         ctx_ms = results.get(label_ctx)
         if no_ms is not None and ctx_ms is not None:
@@ -482,16 +505,20 @@ def main():
             print(f"  map_blocking median (context):    {ctx_ms*1000:.1f}ms")
         else:
             # fallback to any available key
-            key = next((k for k in results if k.startswith("map_blocking (")), None)
+            key = next((k for k in results if k.startswith("Dovetail map_blocking (")), None)
             print(f"\n  map_blocking median: {results[key]*1000:.1f}ms" if key else "\n  map_blocking median: <missing>")
     else:
-        print(f"\n  map_blocking median: {results[f'map_blocking ({workers} workers)']*1000:.1f}ms" if observe
-              else f"{results[f'map_blocking ({workers} workers)']*1000:.1f}ms")
+        print(f"\n  map_blocking median: {results[f'Dovetail map_blocking ({workers} workers)']*1000:.1f}ms" if observe
+              else f"{results[f'Dovetail map_blocking ({workers} workers)']*1000:.1f}ms")
 
-    print("  [3/3] async gather...", end=" ", flush=True)
+    print("  [4/5] Native asyncio.gather...", end=" ", flush=True)
+    results["Native asyncio.gather"] = median_time(run_native_async_gather, runs, n, duration)
+    print(f"{results['Native asyncio.gather']*1000:.1f}ms")
+
+    print("  [5/5] Dovetail async gather...", end=" ", flush=True)
     if compare:
-        label_no = "async gather [no-context]"
-        label_ctx = "async gather [context]"
+        label_no = "Dovetail async gather [no-context]"
+        label_ctx = "Dovetail async gather [context]"
         if observe and runs > 1:
             silent_no = [timed(run_async_gather, n, duration, context_manager=False, trace=trace)[1] for _ in range(runs - 1)]
             print()
@@ -510,25 +537,25 @@ def main():
             silent = [timed(run_async_gather, n, duration, context_manager=context_manager, trace=trace)[1] for _ in range(runs - 1)]
             print()
             _, observed = timed(run_async_gather, n, duration, context_manager=context_manager, observe=True, trace=trace)
-            results["async gather"] = statistics.median(silent + [observed])
+            results["Dovetail async gather"] = statistics.median(silent + [observed])
         else:
-            results["async gather"] = median_time(
+            results["Dovetail async gather"] = median_time(
                 run_async_gather, runs, n, duration, context_manager=context_manager, observe=observe, trace=trace
             )
     if compare:
-        no_key = "async gather [no-context]"
-        ctx_key = "async gather [context]"
+        no_key = "Dovetail async gather [no-context]"
+        ctx_key = "Dovetail async gather [context]"
         no_ms = results.get(no_key)
         ctx_ms = results.get(ctx_key)
         if no_ms is not None and ctx_ms is not None:
             print(f"\n  async gather median (no-context): {no_ms*1000:.1f}ms")
             print(f"  async gather median (context):    {ctx_ms*1000:.1f}ms")
         else:
-            key = next((k for k in results if k.startswith("async gather")), None)
+            key = next((k for k in results if k.startswith("Dovetail async gather")), None)
             print(f"\n  async gather median: {results[key]*1000:.1f}ms" if key else "\n  async gather median: <missing>")
     else:
-        print(f"\n  async gather median: {results['async gather']*1000:.1f}ms" if observe
-              else f"{results['async gather']*1000:.1f}ms")
+        print(f"\n  async gather median: {results['Dovetail async gather']*1000:.1f}ms" if observe
+              else f"{results['Dovetail async gather']*1000:.1f}ms")
 
     print_results(n, duration, results)
 
