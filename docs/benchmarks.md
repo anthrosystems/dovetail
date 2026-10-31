@@ -1,8 +1,9 @@
 # Dovetail benchmark guide
 
-`tests/benchmark.py` compares **serial synchronous calls**, Dovetail
-`task.map_blocking()` over a thread pool, and `asyncio.gather()` over native
-async coroutines. The jobs simulate I/O delays with `time.sleep()` or
+`tests/benchmark.py` compares **five modes**: serial Python, native
+`ThreadPoolExecutor`, Dovetail `task.map_blocking()`, native
+`asyncio.gather()` and Dovetail-scheduled coroutines gathered with
+`asyncio.gather()`. The jobs simulate I/O delays with `time.sleep()` or
 `asyncio.sleep()`. These results are demonstrations of scheduling overhead and
 concurrency, **not** production throughput guarantees or CPU benchmarks.
 
@@ -23,7 +24,7 @@ the checked-out source rather than an installed PyPI version.
 | --- | --- | --- |
 | `--tasks N` | `20` | Number of jobs per mode |
 | `--duration SECONDS` | `0.1` | Simulated I/O wait per job |
-| `--workers N` | `8` | Maximum executor threads for `map_blocking` |
+| `--workers N` | `8` | Maximum executor threads for both native and Dovetail threadpools |
 | `--runs N` | `3` | Repetitions; median reported |
 | `--context-manager` | Enabled | Use `with Dovetail(...)` for pool lifecycle |
 | `--no-context-manager` | Disabled | Manage the instance and shutdown manually |
@@ -55,14 +56,25 @@ python tests/benchmark.py --tasks 30 --duration 0.01 --workers 8 --observe --tra
 ## Interpret the output
 
 - **Serial:** approximate baseline `tasks × duration`, plus Python overhead.
-- **Thread pool:** the ideal I/O-only lower bound is approximately
+- **Both thread pools:** the ideal I/O-only lower bound is approximately
   `ceil(tasks / workers) × duration`; queueing, executor startup, callbacks
   and system scheduling increase actual elapsed time.
-- **Native async gather:** simulated `asyncio.sleep` jobs can overlap on one
-  event loop; it is not an apples-to-apples benchmark against blocking SDK
-  calls or thread scheduling.
+- **Native async gather:** directly gathers `async_io_job` coroutines, with no
+  Dovetail instance or scheduling wrapper.
+- **Dovetail async gather:** schedules the same coroutines through
+  `dvt.task.schedule()` before gathering them; the benchmark excludes a redundant post-gather sleep so both modes time
+  their actual work and lifecycle overhead.
+- **Fair comparisons:** both threadpool modes use the same `--workers` cap;
+  both gather modes schedule all jobs concurrently. Async and threadpool
+  modes differ in resource model, so speedup across them is illustrative.
+  The reported ideal ceilings ignore overhead and Windows timer granularity.
 - **Median and speedup:** compare repeated runs on the same machine, Python
   version and workload; use raw elapsed times alongside ratios.
+
+The benchmark reports the median wall-clock time over `--runs` and includes
+executor/event-loop lifecycle in each timed run. `--compare` varies Dovetail
+context-manager usage only; native baselines are unchanged. `--observe` and
+`--trace` apply only to Dovetail modes and can distort their timings.
 
 The benchmark does **not** currently measure `task.map()` directly, cancellation
 fairness, real network/SDK latency, memory bounds, `contextvars` propagation,
