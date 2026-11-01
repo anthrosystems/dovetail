@@ -337,19 +337,22 @@ class Task:
         if not values:
             return []
         limit = max_concurrency if max_concurrency is not None else self.dovetail._threadpool._max_workers
-        semaphore = asyncio.Semaphore(limit)
         results: list[Any] = [None] * len(values)
+        next_index = 0
 
-        async def run_one(index: int, value: Any) -> None:
-            async with semaphore:
+        async def run_worker() -> None:
+            nonlocal next_index
+            while next_index < len(values):
+                index = next_index
+                next_index += 1
                 try:
-                    results[index] = await self.to_thread(func, value)
+                    results[index] = await self.to_thread(func, values[index])
                 except Exception as exc:
                     if not return_exceptions:
                         raise
                     results[index] = exc
 
-        jobs = [asyncio.create_task(run_one(i, value)) for i, value in enumerate(values)]
+        jobs = [asyncio.create_task(run_worker()) for _ in range(min(limit, len(values)))]
         try:
             await asyncio.gather(*jobs)
         except BaseException:
