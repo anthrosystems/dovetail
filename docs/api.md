@@ -76,13 +76,17 @@ async def main():
 asyncio.run(main())
 ```
 
-`map()` materialises the input iterable and creates asyncio tasks for its
-items. `max_concurrency` limits **active** calls, not the number of queued
-asyncio tasks; it must be at least 1. When omitted, it uses the thread pool's
-worker count. Results preserve input order. With `return_exceptions=True`,
-ordinary exceptions appear at their corresponding positions. Otherwise the
-first failure propagates and sibling asyncio tasks are cancelled; running
-Python threads may continue. `map()` is **not** an async-function mapper:
+`map()` materialises the input iterable and creates at most
+`min(max_concurrency, len(items))` asyncio worker tasks; each worker fetches
+another item after its preceding operation completes. `max_concurrency`
+limits active calls and must be at least 1. When omitted, the thread pool's
+worker count is used. Results preserve input order. With
+`return_exceptions=True`, ordinary exceptions appear at their corresponding
+positions. Otherwise the first failure propagates and remaining asyncio
+workers are cancelled, so unstarted items are not submitted; already-running
+Python threads may continue. Cancelling the entire map has the same thread
+limitation. Separate concurrent `map()` calls have independent worker state.
+`map()` is **not** an async-function mapper:
 passing an `async def` function does not await the coroutine it returns.
 Use `asyncio.gather()` with a semaphore for async I/O instead.
 
@@ -130,6 +134,8 @@ wrapper inside a running event loop. `managed()` does **not** accept a
   later events. Configure underlying network/SDK timeouts separately.
 - Cancelling an `asyncio.Task` may stop awaiting a result, but cannot forcibly
   terminate its worker function.
+- Cancelling a mapping operation stops its asyncio workers from taking further
+  items, but cannot revoke already submitted synchronous work or its effects.
 - Worker-originated lifecycle events are posted to the asyncio loop. For a
   normally finishing `to_thread` call, Dovetail waits for queued event
   callbacks before returning; after a timeout or cancellation the worker may
@@ -170,6 +176,10 @@ execution and may be traced/logged. Reentry controls guard recursive callback
 chains, but concurrency-sensitive listener interactions still require care.
 `events.stats()` returns a snapshot of cumulative counters. Use
 `events.inc_stat(key, count=1)` for custom counters.
+
+When an event has no subscribers, Dovetail skips payload scope matching while
+still updating the relevant cumulative task statistics. Registered listeners
+continue to receive normal lifecycle payloads.
 
 Enable trace output with `Dovetail(trace=True, trace_logger=logger,
 trace_prefix="Worker")`. The instance exposes `events.trace(message)` and

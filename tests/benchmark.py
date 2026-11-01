@@ -89,11 +89,11 @@ Usage:
 
 import argparse
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import logging
 import statistics
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

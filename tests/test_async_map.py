@@ -2,11 +2,96 @@ import asyncio
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from pydovetail import Dovetail
 
 
 class AsyncMapTests(unittest.IsolatedAsyncioTestCase):
+    async def test_large_input_creates_only_bounded_worker_tasks(self):
+        original_create_task = asyncio.create_task
+        created = []
+
+        def track_task(coro):
+            task = original_create_task(coro)
+            created.append(task)
+            return task
+
+        with Dovetail(max_workers=4) as dvt:
+            with patch('pydovetail._task.asyncio.create_task', side_effect=track_task):
+                result = await dvt.task.map(lambda value: value + 1, range(1000), max_concurrency=3)
+        self.assertEqual(result, list(range(1, 1001)))
+        self.assertEqual(len(created), 3)
+
+    async def test_multiple_failures_returned_in_input_order(self):
+        def work(value):
+            if value % 3 == 0:
+                raise ValueError(str(value))
+            return value * 2
+
+        with Dovetail(max_workers=4) as dvt:
+            results = await dvt.task.map(work, range(12), max_concurrency=3, return_exceptions=True)
+        for index, result in enumerate(results):
+            if index % 3 == 0:
+                self.assertIsInstance(result, ValueError)
+                self.assertEqual(str(result), str(index))
+            else:
+                self.assertEqual(result, index * 2)
+
+    async def test_concurrent_maps_keep_separate_ordered_results(self):
+        with Dovetail(max_workers=6) as dvt:
+            first, second = await asyncio.gather(
+                dvt.task.map(lambda value: value * 2, range(50), max_concurrency=2),
+                dvt.task.map(lambda value: value + 100, range(50), max_concurrency=3),
+            )
+        self.assertEqual(first, [index * 2 for index in range(50)])
+        self.assertEqual(second, [index + 100 for index in range(50)])
+
+    async def test_cancelled_map_does_not_start_more_items(self):
+        started = threading.Event()
+        release = threading.Event()
+        seen = []
+        lock = threading.Lock()
+
+        def work(value):
+            with lock:
+                seen.append(value)
+            started.set()
+            release.wait(timeout=2)
+            return value
+
+        with Dovetail(max_workers=2) as dvt:
+            mapping = asyncio.create_task(dvt.task.map(work, range(100), max_concurrency=2))
+            try:
+                self.assertTrue(await asyncio.wait_for(asyncio.to_thread(started.wait), 2))
+                mapping.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await mapping
+            finally:
+                release.set()
+        self.assertLessEqual(len(seen), 2)
+
+    async def test_failure_cancels_remaining_map_workers(self):
+        release = threading.Event()
+        seen = []
+        lock = threading.Lock()
+
+        def work(value):
+            with lock:
+                seen.append(value)
+            if value == 0:
+                raise ValueError('first worker failed')
+            release.wait(timeout=2)
+            return value
+
+        with Dovetail(max_workers=2) as dvt:
+            try:
+                with self.assertRaisesRegex(ValueError, 'first worker failed'):
+                    await dvt.task.map(work, range(100), max_concurrency=2)
+            finally:
+                release.set()
+        self.assertLessEqual(len(seen), 2)
+
     async def test_order_and_concurrency(self):
         active = 0
         peak = 0
