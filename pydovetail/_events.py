@@ -382,16 +382,21 @@ class Events:
         if not event_name:
             return 0
 
-        data = dict(payload or {})
-        function_key = self._function_scope_key(data.get("function")) if data.get("function") is not None else None
-        instance_key = self._payload_instance_key(data)
-
         # Snapshot the global listeners under lock then release the lock
         # before performing matching. This prevents holding `_lock` during
         # callback invocation which could lead to deadlocks if callbacks
         # register/unregister listeners.
         with self._lock:
             global_listeners = list(self._listeners.get(event_name, {}).items())
+        if not global_listeners:
+            return 0
+
+        # No payload normalization or scope lookup is needed when no one is
+        # subscribed to this event. The snapshot above keeps registration and
+        # dispatch synchronized without holding the lock during callbacks.
+        data = dict(payload or {})
+        function_key = self._function_scope_key(data.get("function")) if data.get("function") is not None else None
+        instance_key = self._payload_instance_key(data)
 
         # First pass: filter the snapshot to the set of listeners that
         # should receive this event. We consult subscription metadata for
