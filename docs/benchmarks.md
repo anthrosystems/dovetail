@@ -59,6 +59,11 @@ python tests/benchmark.py --tasks 30 --duration 0.01 --workers 8 --observe --tra
 - **Both thread pools:** the ideal I/O-only lower bound is approximately
   `ceil(tasks / workers) × duration`; queueing, executor startup, callbacks
   and system scheduling increase actual elapsed time.
+- **Dovetail bounded mapping:** `task.map_blocking()` uses `task.map()`, which
+  schedules up to `max_concurrency` asyncio worker coroutines rather than one
+  coroutine per input. The input and ordered result list are still fully
+  materialised. Worker-pool coordination and lifecycle instrumentation remain
+  measurable overhead relative to native `ThreadPoolExecutor.map()`.
 - **Native async gather:** directly gathers `async_io_job` coroutines, with no
   Dovetail instance or scheduling wrapper.
 - **Dovetail async gather:** schedules the same coroutines through
@@ -69,7 +74,9 @@ python tests/benchmark.py --tasks 30 --duration 0.01 --workers 8 --observe --tra
   modes differ in resource model, so speedup across them is illustrative.
   The reported ideal ceilings ignore overhead and Windows timer granularity.
 - **Median and speedup:** compare repeated runs on the same machine, Python
-  version and workload; use raw elapsed times alongside ratios.
+  version and workload; use raw elapsed times alongside ratios. For smaller
+  changes, alternate baseline and candidate runs to reduce clock drift,
+  thermal effects and other environmental variation.
 
 The benchmark reports the median wall-clock time over `--runs` and includes
 executor/event-loop lifecycle in each timed run. `--compare` varies Dovetail
